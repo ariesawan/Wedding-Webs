@@ -212,39 +212,61 @@ menandai `reminder_sent_at` supaya tidak terkirim dua kali.
 
 ## 11. Pipeline klien — dari prospek sampai hari-H
 
-Menjadwalkan pertemuan saja tidak menjawab "lalu apa". Menu **Klien** memberi setiap
-prospek satu tahap yang jelas dan satu tindakan berikutnya yang punya tanggal.
-Kalau tanggal itu lewat, klien muncul di daftar **Perlu ditindaklanjuti** di
-Ringkasan — itulah yang mencegah prospek hilang begitu saja.
+Setiap klien punya satu tahap dan satu tindakan berikutnya yang bertanggal.
+Kalau tanggal itu lewat, klien muncul di **Hari ini** pada Ringkasan.
 
 ```
-Prospek baru → Konsultasi → Penawaran → Negosiasi → Deal → Persiapan → Hari-H → Selesai
-                                     ↘ Tidak jadi (alasan wajib dicatat)
+Prospek baru → Price list → Spesifikasi → Penawaran → Deal → Persiapan → Hari-H → Selesai
+      └──────────────── Tidak jadi (alasan wajib, dicatat di Analisa) ────────────────┘
 ```
+
+Halaman klien dibuka dengan kartu **Langkah sekarang** — isinya mengikuti tahap,
+lengkap dengan tombol yang dibutuhkan. Sisanya ada di tab: Ikhtisar, Kebutuhan,
+Penawaran, Data lengkap, Vendor, Pembayaran, Data klien.
+
+### Peran
+
+| Peran | Bagian |
+|---|---|
+| Admin early | Prospek baru sampai deal: price list, konsultasi, penawaran, nego |
+| Admin office | Setelah deal: data lengkap, vendor, persiapan, termin |
+| Owner | Semuanya |
 
 ### Yang berjalan otomatis
 
 | Kejadian | Akibatnya |
 |---|---|
-| Klien baru dicatat | Tindakan "Balas dan tawarkan jadwal" + tenggat H+1 |
-| Pertemuan dijadwalkan | Tahap naik ke **Konsultasi**, tenggat = tanggal pertemuan |
-| Hasil pertemuan **Lanjut** | Tahap naik ke **Penawaran**, tenggat H+3 |
-| Hasil pertemuan **Masih dipikir** | Pengingat follow-up disetel 3 hari lagi |
-| Hasil pertemuan **Tidak jadi** | Masuk arsip, alasan dicatat untuk evaluasi |
-| Masuk tahap **Deal** | Event dibuat (tersembunyi) + termin DP/2/pelunasan disusun otomatis |
-| Masuk tahap **Persiapan** | Checklist 17 langkah dibuat, H-90 sampai H+3 |
-| Tanggal nikah digeser | Seluruh jatuh tempo checklist ikut bergeser |
-| H-7 sebelum acara | Tahap naik sendiri ke **Hari-H** (lewat cron) |
-| Acara sudah lewat | Tahap naik sendiri ke **Selesai** (lewat cron) |
+| Klien baru dicatat / masuk lewat formulir | Tindakan "Kirim price list", tenggat H+1 |
+| Price list ditandai terkirim | Tahap → **Price list** |
+| Price list **cocok** | Tahap → **Spesifikasi** (belum deal) |
+| Konsultasi dijadwalkan | Prospek baru / price list → **Spesifikasi** |
+| Hasil konsultasi **Lanjut** | Tindakan "Susun dan kirim penawaran", tenggat H+3 |
+| Penawaran ditandai terkirim | Tahap → **Penawaran** |
+| Klien menawar | Angka & alasannya dicatat, lalu **Buat revisi** |
+| Penawaran **disetujui** | **Deal**: nilai deal = total penawaran, termin dari *template pembayaran*, event dibuat, klien pindah ke admin office |
+| Price list / penawaran **tidak cocok** | Tahap → **Tidak jadi**, langsung diarahkan ke Analisa |
+| Mulai persiapan | Checklist 17 langkah H-90 sampai H+3 |
+| H-7 (deal atau persiapan) | Tahap → **Hari-H** (cron) |
+| Acara lewat | Tahap → **Selesai** (cron) |
 
-Termin bawaan: DP sesuai `dp_percent` (default 30%), termin 2 jatuh tempo H-60,
-pelunasan H-14. Semuanya bisa diubah manual per klien.
+Perpindahan otomatis hanya **maju**: mengirim price list tambahan ke klien yang
+sudah deal tidak menyeretnya mundur.
 
-### Mencatat hasil pertemuan
+Termin pembayaran disusun dari tabel `payment_templates` — sama persis dengan
+yang tercantum di teks penawaran yang dikirim ke klien.
 
-Buka **Jadwal klien → pilih jadwal**. Kartu *Hasil pertemuan* muncul begitu waktu
-mulai sudah lewat. Inilah sambungan antara "sudah meeting" dan "lalu bagaimana" —
-mengisinya menggerakkan tahap klien secara otomatis.
+### Tautan penawaran untuk klien
+
+Teks WhatsApp penawaran memuat tautan `…/penawaran.php?t=…`. Halaman itu
+hanya-baca, tidak diindeks, dan mencatat kapan klien pertama kali membukanya
+(terlihat di kartu Langkah sekarang: "sudah dibuka klien").
+
+### Struktur database
+
+Mulai v22, kolom yang dibutuhkan kode ditambahkan sendiri saat halaman
+pertama dibuka setelah unggah (`inc/skema.php`). Kalau hosting menolak,
+panel owner menampilkan peringatan kuning — jalankan `db/migration-v22.sql`
+lewat phpMyAdmin.
 
 ---
 

@@ -671,7 +671,8 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
       <textarea rows="9" readonly id="teksWa" style="margin-top:9px;font-family:var(--mono);font-size:12px"><?= e(quoteTeksWA($qid)) ?></textarea>
       <button type="button" class="btn sm ghost" style="margin-top:8px" id="salinWa">Salin teks</button>
     </details>
-    <form method="post" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    <form method="post" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center"
+          <?= (float) $hitung['total'] <= 0 ? 'onsubmit="return confirm(\'Totalnya masih Rp 0 — harga belum diisi. Tetap tandai terkirim?\')"' : '' ?>>
       <?= csrfField() ?><input type="hidden" name="act" value="kirim"><input type="hidden" name="id" value="<?= $qid ?>">
       <?php if (waSiap()): ?>
         <label style="display:flex;gap:8px;align-items:center;font-size:13.5px;margin:0">
@@ -751,7 +752,8 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
     <tbody>
     <?php foreach ($lain as $r): ?>
       <tr style="<?= (int) $r['id'] === $qid ? 'background:var(--ivory-07)' : '' ?>">
-        <td data-l="Nomor"><b><?= e($r['nomor']) ?></b><?= $r['revisi'] > 1 ? ' <span class="muted">rev ' . (int) $r['revisi'] . '</span>' : '' ?></td>
+        <td data-l="Nomor"><b><?= e($r['nomor']) ?></b><?= $r['revisi'] > 1 ? ' <span class="muted">rev ' . (int) $r['revisi'] . '</span>' : '' ?>
+          <br><span class="muted mono" style="font-size:10.5px"><?= $r['jenis'] === 'pricelist' ? 'price list' : 'penawaran' ?></span></td>
         <td data-l="Status"><?php [$stL, $stC] = statusPenawaran($r['status']); ?><span class="pill <?= $stC ?>"><?= e($stL) ?></span></td>
         <td class="num" data-l="Kita ajukan"><?= rupiah((float) $r['total']) ?></td>
         <td class="num" data-l="Klien minta"><?= !empty($r['nego_nilai']) ? rupiah((float) $r['nego_nilai']) : '—' ?></td>

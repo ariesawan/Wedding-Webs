@@ -664,7 +664,7 @@ if ($c):
     $tasks  = all("SELECT * FROM client_tasks WHERE client_id = ? ORDER BY COALESCE(due_date,'2099-12-31'), sort_order", [$c['id']]);
     $pays   = all("SELECT * FROM payments WHERE client_id = ? ORDER BY sort_order, id", [$c['id']]);
     $acts   = all("SELECT a.*, u.name uname FROM client_activities a LEFT JOIN users u ON u.id = a.user_id
-                   WHERE a.client_id = ? ORDER BY a.created_at DESC LIMIT 60", [$c['id']]);
+                   WHERE a.client_id = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 60", [$c['id']]);
     $meets  = all("SELECT * FROM meetings WHERE client_id = ? ORDER BY start_at DESC", [$c['id']]);
     $segmen = segmenKlien($c['id']);
     $segByKey = [];
@@ -1019,7 +1019,13 @@ if ($c):
 
       <?php if ($acts): ?>
         <ul class="tl">
-          <?php foreach ($acts as $i => $a): ?>
+          <?php foreach ($acts as $i => $a):
+            // Delapan teratas cukup untuk tahu "terakhir ada apa"; sisanya dilipat.
+            if ($i === 8): ?>
+        </ul>
+        <details class="tl-lagi"><summary>Tampilkan <?= count($acts) - 8 ?> catatan lebih lama</summary>
+        <ul class="tl">
+            <?php endif; ?>
             <li class="<?= $i === 0 ? 'hi' : '' ?>">
               <span class="w"><?= tanggalID($a['created_at'], true) ?><?= $a['uname'] ? ' · ' . e($a['uname']) : '' ?></span>
               <div class="t"><?= e($a['title']) ?></div>
@@ -1027,6 +1033,7 @@ if ($c):
             </li>
           <?php endforeach; ?>
         </ul>
+        <?php if (count($acts) > 8): ?></details><?php endif; ?>
       <?php else: ?>
         <p class="sub">Belum ada riwayat.</p>
       <?php endif; ?>
@@ -1861,6 +1868,10 @@ if ($c):
    hanya satu tab terlihat; tautan #jangkar lama (#susunan, #uang, #chat …)
    — dipakai redirect sesudah menyimpan — membuka tab yang memuatnya. */
 (() => {
+  // Di layar sempit jalur tahap digeser sampai tahap sekarang terlihat.
+  const kini = document.querySelector('.stepper li.now');
+  if (kini) { const ol = kini.parentElement; ol.scrollLeft = kini.offsetLeft - ol.clientWidth / 2 + kini.clientWidth / 2; }
+
   const nav = document.getElementById('tabKlien');
   if (!nav) return;
   const panes = [...document.querySelectorAll('.tabpane')];

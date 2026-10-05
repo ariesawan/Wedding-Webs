@@ -947,3 +947,19 @@ label.inline{display:inline-flex;gap:7px;align-items:center;font-size:13.5px;mar
 .kalender > summary::-webkit-details-marker{display:none}
 .kalender[open] > summary .hint{display:none!important}
 .board.pipa .lead{background:var(--ink-2)}
+.tabs{flex-wrap:wrap}
+@media(max-width:700px){ .tabs{flex-wrap:nowrap} }
+.tl-lagi > summary{cursor:pointer;font-size:12.5px;color:var(--ember);margin:4px 0 12px;list-style:none}
+.tl-lagi > summary::-webkit-details-marker{display:none}
+.langkah + .card{margin-top:18px}
+/* Di layar sempit .tbl berubah jadi tumpukan kartu. Untuk tabel ringkasan
+   dua kolom itu terlalu boros — tiap baris jadi kotak sendiri. */
+@media(max-width:900px){
+  .ringkas .tbl tr{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+    padding:7px 0;margin:0;border:0;border-bottom:1px solid var(--ivory-07);border-radius:0;background:transparent;box-shadow:none}
+  .ringkas .tbl td{padding:0!important;width:auto;display:block}
+  .ringkas .tbl td.right{text-align:right!important}
+  .ringkas .hitung{font-size:30px}
+  .stepper li{min-width:96px}
+}
+.stepper{position:relative}

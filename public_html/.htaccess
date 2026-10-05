@@ -93,6 +93,12 @@ Options -Indexes -ExecCGI
 <FilesMatch "\.(sql|log|md|sample|bak|ini|env)$">
   Require all denied
 </FilesMatch>
+# Salinan cadangan bernama "klien.php.bak-20260905-173118" TIDAK tertangkap
+# aturan di atas (ekstensinya bukan .bak), sehingga kode sumbernya bisa
+# diunduh mentah. error_log memuat path server dan isi query yang gagal.
+<FilesMatch "(\.bak|\.bak-[0-9-]+|\.orig|~|^error_log)$">
+  Require all denied
+</FilesMatch>
 
 # ---------- Kompresi ----------
 <IfModule mod_deflate.c>

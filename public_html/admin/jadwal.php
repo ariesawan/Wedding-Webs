@@ -179,11 +179,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $edit   = isset($_GET['edit']) ? one("SELECT * FROM meetings WHERE id = ?", [(int) $_GET['edit']]) : null;
 $isNew  = isset($_GET['new']);
 $events = all("SELECT id, title, event_date FROM events ORDER BY event_date DESC LIMIT 100");
-$clients = all("SELECT id, name, partner_name, stage, wedding_date FROM clients
-                WHERE stage NOT IN ('selesai','batal') ORDER BY name LIMIT 200");
 // Dipanggil dari tombol "Jadwalkan pertemuan" di halaman klien.
-$preClient = (int) ($_GET['client'] ?? 0);
-$preData   = $preClient ? one("SELECT * FROM clients WHERE id = ?", [$preClient]) : null;
 $klienList = all("SELECT id, name, partner_name, stage, email, phone FROM clients
                   WHERE stage NOT IN ('selesai','batal') ORDER BY name LIMIT 300");
 $preClient = (int) ($_GET['client'] ?? 0);
@@ -280,17 +276,10 @@ if ($edit || $isNew):
           <label for="lt">Alamat pertemuan</label>
           <input type="text" id="lt" name="location_text" value="<?= $v('location_text', setting('address_street', '')) ?>">
         </div>
-        <div class="field"><label for="cl">Klien terkait</label>
-          <select id="cl" name="client_id">
-            <option value="">— tanpa kaitan pipeline —</option>
-            <?php foreach ($clients as $cl):
-              $sel = (int) ($edit['client_id'] ?? $preClient) === (int) $cl['id']; ?>
-              <option value="<?= $cl['id'] ?>" <?= $sel ? 'selected' : '' ?>>
-                <?= e($cl['name'] . ($cl['partner_name'] ? ' & ' . $cl['partner_name'] : '')) ?> · <?= e(stageLabel($cl['stage'])) ?></option>
-            <?php endforeach; ?>
-          </select>
-          <p class="hint">Bila dikaitkan, hasil pertemuan akan otomatis menggerakkan tahap klien di papan pipeline.</p></div>
-
+        <?php /* Pilihan "Klien terkait" kedua dibuang: namanya sama (client_id)
+                 dengan "Kaitkan ke klien" di kartu atas, dan PHP memakai yang
+                 terakhir — memilih klien di atas lalu menyimpan malah
+                 melepas kaitannya karena yang bawah masih kosong. */ ?>
         <div class="field"><label for="ev">Kaitkan ke event</label>
           <select id="ev" name="event_id">
             <option value="">— tidak dikaitkan —</option>
