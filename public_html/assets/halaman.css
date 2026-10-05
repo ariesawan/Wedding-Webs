@@ -1,0 +1,265 @@
+/* =====================================================================
+   Variabel yang TIDAK ada di kerangka publik.
+   =====================================================================
+   partials/public-head.php hanya mendefinisikan --ember, --ivory-12, dan
+   beberapa lainnya. Tiga di bawah dipakai berkas ini tapi tidak pernah ada
+   di sana — akibatnya warnanya jatuh ke nilai kosong dan elemen terlihat
+   transparan tanpa satu pun pesan galat. Didefinisikan di sini supaya
+   berkas ini berdiri sendiri, bukan bergantung pada apa yang kebetulan
+   sudah ada di halaman pemanggilnya.
+   ===================================================================== */
+:root{
+  --gold:#E9A85C;
+  --gold-line:rgba(233,168,92,.45);
+  --ivory-07:rgba(241,234,217,.07);
+}
+
+/* =====================================================================
+   Halaman kategori vendor (.vk) dan formulir publik (.fm)
+   =====================================================================
+   Dipisah dari index.php karena dua halaman ini tidak memuat CSS beranda
+   yang 40 KB itu. Berkas terpisah bisa di-cache peramban dan dipakai ulang
+   antar halaman — sesuatu yang mustahil untuk gaya yang ditulis inline.
+   ===================================================================== */
+
+.vk{max-width:1100px;margin:0 auto;padding:clamp(72px,10vw,120px) clamp(20px,5vw,56px) clamp(60px,8vw,100px)}
+
+/* ---------- jejak halaman ---------- */
+.vk-crumb{font-family:var(--mono);font-size:11px;letter-spacing:.09em;
+  color:var(--ivory-38);margin-bottom:clamp(24px,4vw,40px)}
+.vk-crumb a{color:var(--ivory-60);text-decoration:none}
+.vk-crumb a:hover{color:var(--gold)}
+.vk-crumb span{margin:0 7px;opacity:.4}
+.vk-crumb b{color:var(--ivory);font-weight:500}
+
+/* ---------- gambar utama kategori ---------- */
+.vk-hero{margin:0 0 clamp(28px,4vw,44px);border-radius:18px;overflow:hidden;
+  border:1px solid var(--ivory-12);background:var(--ink-2)}
+/* aspect-ratio menjaga tinggi kotaknya tetap sama sebelum dan sesudah gambar
+   turun. Bersama atribut width/height di HTML, ini yang mencegah halaman
+   melompat — bukan salah satunya saja. */
+.vk-hero img{display:block;width:100%;height:auto;aspect-ratio:16/7;object-fit:cover}
+@media(max-width:620px){.vk-hero img{aspect-ratio:4/3}}
+
+/* ---------- kepala ---------- */
+.vk-head{margin-bottom:clamp(38px,6vw,64px)}
+.vk-head-l{text-align:center;max-width:56ch;margin-left:auto;margin-right:auto}
+.vk-ikon{display:inline-grid;place-items:center;width:64px;height:64px;border-radius:18px;
+  border:1px solid var(--gold-line);background:rgba(233,168,92,.07);color:var(--gold);margin-bottom:20px}
+.vk-head h1{font-family:var(--serif);font-weight:400;line-height:1.1;
+  font-size:clamp(30px,5vw,52px);color:var(--ivory)}
+.vk-lead{margin-top:14px;max-width:56ch;color:var(--ivory-60);
+  font-size:clamp(15px,1.7vw,17.5px);line-height:1.65}
+.vk-harga{margin-top:22px;display:inline-flex;align-items:baseline;gap:10px;
+  padding:10px 18px;border-radius:99px;border:1px solid var(--ivory-12)}
+.vk-harga span{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ivory-38)}
+.vk-harga b{font-family:var(--serif);font-size:20px;color:var(--gold);font-weight:400}
+.vk-harga-nb{margin-top:9px;font-size:12.5px;color:var(--ivory-38);max-width:52ch;line-height:1.6}
+
+/* ---------- blok isi ---------- */
+.vk-blok{margin-bottom:clamp(34px,5vw,56px)}
+.vk-blok h2{font-family:var(--serif);font-weight:400;font-size:clamp(21px,2.8vw,29px);
+  color:var(--ivory);margin-bottom:16px}
+.vk-blok p{color:var(--ivory-60);font-size:15px;line-height:1.75;max-width:62ch;margin-bottom:12px}
+.vk-isi h3{font-family:var(--serif);font-weight:400;font-size:19px;color:var(--ivory);margin:22px 0 10px}
+.vk-isi ul,.vk-isi ol{margin:0 0 14px 20px;color:var(--ivory-60);font-size:15px;line-height:1.75}
+.vk-isi li{margin-bottom:7px}
+
+.vk-chip{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}
+.vk-chip li{padding:7px 15px;border-radius:99px;border:1px solid var(--ivory-12);
+  font-size:13.2px;color:var(--ivory-60)}
+
+/* Pertanyaan dinomori — urutannya berarti. Yang pertama adalah yang paling
+   sering membuat orang menyesal kalau tidak ditanyakan. */
+.vk-tanya{margin:0;padding-left:0;list-style:none;counter-reset:tanya}
+.vk-tanya li{counter-increment:tanya;position:relative;padding:14px 0 14px 44px;
+  border-bottom:1px solid var(--ivory-07);color:var(--ivory-60);font-size:14.6px;line-height:1.7}
+.vk-tanya li:last-child{border-bottom:0}
+.vk-tanya li::before{content:counter(tanya);position:absolute;left:0;top:13px;
+  width:26px;height:26px;border-radius:50%;display:grid;place-items:center;
+  font-family:var(--mono);font-size:11px;color:var(--gold);
+  border:1px solid var(--gold-line);background:rgba(233,168,92,.07)}
+
+/* ---------- kisi kartu ---------- */
+.vk-grid{display:grid;gap:clamp(12px,1.6vw,18px);
+  grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+.vk-grid-l{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
+.vk-card{display:flex;flex-direction:column;gap:9px;text-decoration:none;
+  padding:clamp(20px,2.4vw,26px);border-radius:16px;
+  border:1px solid var(--ivory-12);background:rgba(241,234,217,.025);
+  transition:border-color .3s,transform .3s,background .3s}
+@media(hover:hover){.vk-card:hover{border-color:var(--gold-line);transform:translateY(-3px);
+  background:rgba(241,234,217,.05)}}
+.vk-card-i{color:var(--gold);display:block}
+.vk-card-g{display:block;margin:-1px -1px 4px;border-radius:15px 15px 0 0;overflow:hidden;
+  /* margin negatif menarik gambar sampai ke tepi kartu, menutupi garisnya.
+     Tanpa itu ada celah tipis di antara gambar dan bingkai yang terlihat
+     seperti cacat cetak. */
+  margin-left:calc(-1 * clamp(20px,2.4vw,26px));
+  margin-right:calc(-1 * clamp(20px,2.4vw,26px));
+  margin-top:calc(-1 * clamp(20px,2.4vw,26px))}
+.vk-card-g img{display:block;width:100%;height:auto;aspect-ratio:16/9;object-fit:cover}
+.vk-card:has(.vk-card-g) .vk-card-i{margin-top:2px}
+.vk-card h3{font-family:var(--serif);font-weight:400;font-size:19px;color:var(--ivory);line-height:1.25}
+.vk-card p{font-size:13.2px;line-height:1.6;color:var(--ivory-60);margin:0;flex:1}
+.vk-card-h{font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--gold);margin-top:4px}
+
+/* ---------- ajakan ---------- */
+.vk-cta{margin:clamp(44px,6vw,72px) 0;padding:clamp(30px,4vw,48px);text-align:center;
+  border-radius:20px;border:1px solid var(--gold-line);background:rgba(233,168,92,.05)}
+.vk-cta h2{font-family:var(--serif);font-weight:400;font-size:clamp(22px,3vw,32px);color:var(--ivory)}
+.vk-cta p{margin:12px auto 22px;max-width:48ch;color:var(--ivory-60);font-size:15px;line-height:1.7}
+
+
+/* =====================================================================
+   FORMULIR PUBLIK
+   ===================================================================== */
+.fm{max-width:720px;margin:0 auto;padding:clamp(48px,8vw,90px) clamp(20px,5vw,40px) clamp(60px,8vw,100px)}
+
+.fm-head{text-align:center;margin-bottom:clamp(30px,5vw,46px)}
+.fm-brand{display:inline-block;font-family:var(--serif);font-size:26px;color:var(--ivory);
+  text-decoration:none;margin-bottom:22px}
+.fm-brand sup{font-family:var(--mono);font-size:8.5px;letter-spacing:.2em;
+  color:var(--gold);margin-left:5px;vertical-align:super}
+.fm-head h1{font-family:var(--serif);font-weight:400;line-height:1.12;
+  font-size:clamp(28px,4.4vw,44px);color:var(--ivory)}
+.fm-head p{margin:14px auto 0;max-width:46ch;color:var(--ivory-60);font-size:15px;line-height:1.7}
+
+.fm-galat{padding:14px 18px;border-radius:12px;margin-bottom:22px;
+  border:1px solid rgba(217,123,123,.45);background:rgba(217,123,123,.09)}
+.fm-galat p{color:#E9B4B4;font-size:14px;line-height:1.6;margin:0 0 5px}
+.fm-galat p:last-child{margin:0}
+
+.fm-form fieldset{border:0;padding:0;margin:0 0 clamp(24px,3.5vw,36px)}
+.fm-form legend{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--gold);padding:0;margin-bottom:16px}
+.fm-form label{display:block;margin-bottom:16px;font-size:13.4px;color:var(--ivory-60)}
+.fm-w{color:var(--gold)}
+/* :not() di sini WAJIB. Tanpa itu appearance:none ikut mengenai checkbox
+   dan radio — tanda centang bawaan peramban hilang, kotaknya membesar
+   mengikuti padding, dan status tercentang jadi tidak terlihat sama sekali.
+   Akibatnya orang mengklik, statusnya berubah, tapi layar diam: kotak
+   terlihat sama persis baik dicentang maupun tidak. */
+.fm-form input:not([type="checkbox"]):not([type="radio"]),
+.fm-form select,
+.fm-form textarea{
+  display:block;width:100%;margin-top:7px;padding:13px 15px;
+  border-radius:11px;border:1px solid var(--ivory-12);
+  background:rgba(241,234,217,.04);color:var(--ivory);
+  font-family:inherit;font-size:15px;line-height:1.5;
+  transition:border-color .2s,background .2s;
+  /* 16px di ponsel mencegah iOS memperbesar halaman saat kolom disentuh —
+     dan pembesaran itu membuat sebagian orang mengira formulirnya rusak. */
+  -webkit-appearance:none;appearance:none}
+@media(max-width:520px){
+  .fm-form input:not([type="checkbox"]):not([type="radio"]),
+  .fm-form select,.fm-form textarea{font-size:16px}}
+
+/* Daftar pilihan <select> digambar oleh sistem operasi, bukan oleh CSS
+   halaman ini — jadi latarnya ikut tema terang bawaan sementara warna
+   teksnya mewarisi --ivory yang terang juga. Hasilnya teks nyaris putih di
+   atas latar putih: daftarnya terbuka, tapi isinya tidak terbaca sama
+   sekali. Warna option harus ditetapkan sendiri. */
+.fm-form select option,
+.fm-form select optgroup{
+  background:#1a1a1a;color:#f1ead9}
+.fm-form select option:checked,
+.fm-form select option:hover{
+  background:#E9A85C;color:#141414}
+
+/* Isian otomatis Chrome memaksa latar biru muda lewat gaya internal yang
+   tidak bisa ditimpa dengan background biasa. Bayangan dalam setebal kotak
+   adalah satu-satunya cara menutupinya, dan -webkit-text-fill-color satu-
+   satunya cara mewarnai teksnya. Tanpa ini, kolom yang terisi otomatis
+   (venue, budget, email) jadi kotak terang dengan teks gelap di tengah
+   formulir gelap — dan itu yang terlihat seperti kerusakan tampilan. */
+.fm-form input:-webkit-autofill,
+.fm-form input:-webkit-autofill:hover,
+.fm-form input:-webkit-autofill:focus,
+.fm-form textarea:-webkit-autofill,
+.fm-form select:-webkit-autofill{
+  -webkit-text-fill-color:var(--ivory);
+  -webkit-box-shadow:0 0 0 1000px #1d1d1d inset;
+  box-shadow:0 0 0 1000px #1d1d1d inset;
+  caret-color:var(--ivory);
+  transition:background-color 9999s ease-in-out 0s}
+
+/* Checkbox dan radio dibiarkan memakai gambaran bawaan peramban, hanya
+   warnanya yang disesuaikan. Menggambar ulang keduanya dari nol berarti
+   ikut menanggung fokus keyboard, status indeterminate, dan pembaca layar —
+   pekerjaan yang tidak sepadan untuk sesuatu yang sudah benar bawaannya. */
+.fm-form input[type="checkbox"],
+.fm-form input[type="radio"]{
+  width:17px;height:17px;flex:0 0 17px;margin:0;padding:0;
+  accent-color:var(--gold);cursor:pointer}
+
+/* Radio di kartu pilihan perlu turun sedikit supaya sejajar dengan baris
+   pertama teks, bukan dengan tengah blok dua barisnya. */
+.fm-form .fm-radio input[type="radio"]{margin-top:3px}
+
+/* Label pembungkus ikut bisa diklik. Sasaran 17px terlalu kecil untuk jari,
+   dan orang memang terbiasa menekan tulisannya, bukan kotaknya. */
+.fm-c,.fm-cek label,.fm-radio{cursor:pointer;user-select:none}
+.fm-form input:focus,.fm-form select:focus,.fm-form textarea:focus{
+  outline:none;border-color:var(--gold-line);background:rgba(241,234,217,.06)}
+.fm-form textarea{resize:vertical;min-height:110px}
+.fm-form select{background-image:linear-gradient(45deg,transparent 50%,var(--ivory-38) 50%),
+  linear-gradient(135deg,var(--ivory-38) 50%,transparent 50%);
+  background-position:calc(100% - 20px) calc(50% + 2px),calc(100% - 15px) calc(50% + 2px);
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:42px}
+
+.fm-r2{display:grid;gap:0 16px;grid-template-columns:1fr 1fr}
+@media(max-width:560px){.fm-r2{grid-template-columns:1fr}}
+
+/* Honeypot. Bukan display:none — sebagian bot melewati elemen yang benar-benar
+   disembunyikan. Dipindahkan keluar layar supaya tetap "ada" bagi mereka. */
+.fm-hp{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+
+.fm-kirim{width:100%;justify-content:center;padding:15px;font-size:15px}
+.fm-nb{margin-top:14px;text-align:center;font-size:12.5px;color:var(--ivory-38);line-height:1.6}
+
+.fm-ok{text-align:center;padding:clamp(30px,6vw,60px) 0}
+.fm-ok-i{display:inline-grid;place-items:center;width:64px;height:64px;border-radius:50%;
+  border:1px solid var(--gold-line);background:rgba(233,168,92,.09);
+  color:var(--gold);font-size:26px;margin-bottom:24px}
+.fm-ok h1{font-family:var(--serif);font-weight:400;font-size:clamp(26px,4vw,40px);color:var(--ivory)}
+.fm-ok p{margin:14px auto 0;max-width:44ch;color:var(--ivory-60);font-size:15px;line-height:1.7}
+.fm-ok-n{font-size:13.5px !important;color:var(--ivory-38) !important;margin-top:10px !important}
+.fm-ok .btn{margin:24px 8px 0}
+
+@media(prefers-reduced-motion:reduce){
+  .vk-card,.fm-form input,.fm-form select,.fm-form textarea{transition:none}
+  .vk-card:hover{transform:none}
+}
+
+
+/* ---------- blok tambahan formulir ---------- */
+.fm-ket{font-size:12.8px;color:var(--ivory-38);line-height:1.6;margin:-6px 0 16px}
+.fm-sub{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--gold);margin:26px 0 8px}
+
+.fm-cek{display:flex;gap:18px;flex-wrap:wrap;margin-top:9px}
+.fm-cek label{display:flex;align-items:center;gap:7px;margin:0;font-size:14px;color:var(--ivory-60)}
+.fm-cek input{width:auto;margin:0;accent-color:var(--gold)}
+
+.fm-radio{display:flex;gap:11px;align-items:flex-start;padding:14px 16px;margin-bottom:10px;
+  border:1px solid var(--ivory-12);border-radius:12px;cursor:pointer;font-size:13.6px;
+  color:var(--ivory-60);line-height:1.55}
+.fm-radio input{width:auto;margin:3px 0 0;flex:0 0 auto;accent-color:var(--gold)}
+.fm-radio b{color:var(--ivory);font-weight:600}
+.fm-radio:has(input:checked){border-color:var(--gold-line);background:rgba(233,168,92,.05)}
+
+.fm-grid{display:grid;gap:8px 16px;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));margin-bottom:8px}
+.fm-c{display:flex;align-items:center;gap:8px;margin:0;font-size:13.6px;color:var(--ivory-60)}
+.fm-c input{width:auto;margin:0;flex:0 0 auto;accent-color:var(--gold)}
+
+/* ---------- Top 5 pada formulir publik ---------- */
+.top5{display:grid;gap:10px;margin-top:4px}
+.top5-r{display:flex;align-items:center;gap:12px}
+.top5-n{flex:0 0 30px;height:30px;border-radius:50%;display:grid;place-items:center;
+  font-family:var(--mono);font-size:12px;color:var(--ivory-38);
+  border:1px solid var(--ivory-12)}
+/* Dua teratas ditandai berbeda — merekalah yang paling menentukan rasa acara. */
+.top5-n.utama{color:var(--gold);border-color:var(--gold-line);background:rgba(233,168,92,.08)}
+.top5-p .top5-s{margin-top:0}

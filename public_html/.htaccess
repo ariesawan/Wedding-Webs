@@ -1,0 +1,126 @@
+# ============================================================
+#  Callalily Party CMS — konfigurasi Apache / LiteSpeed (cPanel)
+# ============================================================
+
+# ---------- Halaman error ----------
+ErrorDocument 404 /404.php
+
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+
+# ---------- Paksa HTTPS ----------
+# Aktifkan setelah sertifikat SSL terpasang (AutoSSL cPanel).
+RewriteCond %{HTTPS} !=on
+RewriteCond %{HTTP:X-Forwarded-Proto} !https
+RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
+
+# ---------- Satu bentuk URL saja (hindari konten ganda) ----------
+# Hapus www. Kalau justru ingin memakai www, tukar arah aturannya.
+RewriteCond %{HTTP_HOST} ^www\.(.+)$ [NC]
+RewriteRule ^(.*)$ https://%1/$1 [R=301,L]
+
+# Buang index.php dari URL
+RewriteCond %{THE_REQUEST} \s/+index\.php[\s?] [NC]
+RewriteRule ^ / [R=301,L]
+
+# Alamat lama dari versi statis -> alamat baru
+RewriteRule ^galeri\.html$ /galeri [R=301,L]
+RewriteRule ^index\.html$  /       [R=301,L]
+
+# ---------- Satu bentuk saja: buang garis miring di akhir ----------
+# Harus di ATAS aturan URL bersih. Kalau di bawah, /blog/foo/ dan /blog/foo
+# sama-sama melayani isi yang sama tanpa redirect = konten ganda di mata Google.
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.+)/$ /$1 [R=301,L]
+
+# ---------- URL bersih ----------
+# Subdomain formulir: apa pun yang dibuka di form.callalily.party
+# selain aset diarahkan ke formulir. Ditaruh paling atas supaya tidak
+# tertimpa aturan lain di bawahnya.
+RewriteCond %{HTTP_HOST} ^form\. [NC]
+RewriteCond %{REQUEST_URI} !^/(assets|foto|video|uploads|partials)/ [NC]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ form.php [L,QSA]
+
+RewriteRule ^sitemap\.xml$ sitemap.php [L]
+RewriteRule ^galeri$     galeri.php  [L]
+RewriteRule ^blog$       blog.php    [L]
+
+# Kategori harus dicocokkan LEBIH DULU daripada slug artikel,
+# kalau tidak "kategori" akan dianggap slug artikel.
+RewriteRule ^blog/kategori/([a-z0-9-]+)$ blog.php?kategori=$1 [L,QSA]
+RewriteRule ^blog/([a-z0-9-]+)$          blog-detail.php?slug=$1 [L,QSA]
+RewriteRule ^event/([a-z0-9-]+)$         event.php?slug=$1 [L,QSA]
+
+# Kategori vendor. Daftar dan detail memakai satu berkas — dibedakan
+# ada-tidaknya parameter k, bukan dua berkas yang isinya nyaris sama.
+RewriteRule ^vendor$                     vendor-kategori.php [L]
+RewriteRule ^vendor/([a-z0-9-]+)$        vendor-kategori.php?k=$1 [L,QSA]
+
+# Formulir klien publik. Subdomain form.callalily.party diarahkan ke
+# dokumen root yang sama, jadi aturan ini melayani keduanya:
+# form.callalily.party/  maupun  callalily.party/form
+RewriteRule ^form$                       form.php [L,QSA]
+</IfModule>
+
+# ---------- Webhook WhatsApp ----------
+# Dipanggil server penyedia, bukan peramban — tidak boleh diarahkan ulang
+# ke HTTPS pakai 301 (sebagian penyedia tidak mengikuti redirect pada POST),
+# dan tidak boleh diindeks mesin pencari.
+<Files "wa-webhook.php">
+  Header always set X-Robots-Tag "noindex, nofollow"
+</Files>
+
+# ---------- Header keamanan ----------
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+  # HSTS: aktifkan HANYA setelah yakin seluruh situs berjalan di HTTPS.
+  # Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  Header unset X-Powered-By
+  Header always unset Server
+</IfModule>
+
+# ---------- Sembunyikan informasi server ----------
+ServerSignature Off
+Options -Indexes -ExecCGI
+<FilesMatch "^\.">
+  Require all denied
+</FilesMatch>
+<FilesMatch "\.(sql|log|md|sample|bak|ini|env)$">
+  Require all denied
+</FilesMatch>
+
+# ---------- Kompresi ----------
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript
+  AddOutputFilterByType DEFLATE application/javascript application/json application/xml
+  AddOutputFilterByType DEFLATE application/rss+xml image/svg+xml
+</IfModule>
+
+# ---------- Cache aset statis ----------
+# Berkas gambar/CSS/JS dinamai dengan slug tetap, jadi umur cache dibuat panjang
+# tapi tidak "immutable" supaya penggantian foto tetap bisa terlihat.
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType image/jpeg           "access plus 6 months"
+  ExpiresByType image/png            "access plus 6 months"
+  ExpiresByType image/webp           "access plus 6 months"
+  ExpiresByType image/svg+xml        "access plus 6 months"
+  ExpiresByType video/mp4            "access plus 6 months"
+  ExpiresByType text/css             "access plus 1 month"
+  ExpiresByType application/javascript "access plus 1 month"
+  ExpiresByType font/woff2           "access plus 1 year"
+  ExpiresByType text/html            "access plus 0 seconds"
+</IfModule>
+
+# ---------- Batas upload (sesuaikan bila hosting mengizinkan) ----------
+<IfModule mod_php.c>
+  php_value upload_max_filesize 100M
+  php_value post_max_size 110M
+  php_value max_execution_time 300
+  php_value memory_limit 512M
+</IfModule>

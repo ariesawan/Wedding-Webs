@@ -1,0 +1,15 @@
+# Kredensial server — JANGAN pernah masuk repo
+public_html/inc/config.php
+
+# Media & unggahan: milik server, bukan kode
+public_html/foto/*.jpg
+public_html/foto/*.webp
+public_html/video/*.mp4
+public_html/uploads/event/*.jpg
+public_html/uploads/event/*.webp
+public_html/uploads/blog/*.jpg
+public_html/uploads/blog/*.webp
+
+# Sisa server
+public_html/**/error_log
+public_html/**/*.bak-*

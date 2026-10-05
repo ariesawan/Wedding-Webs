@@ -1,0 +1,20 @@
+User-agent: *
+Allow: /
+
+# Area kerja — tidak ada gunanya diindeks
+Disallow: /admin/
+Disallow: /inc/
+Disallow: /db/
+Disallow: /cron/
+Disallow: /*?q=
+Disallow: /404.php
+Disallow: /wa-webhook.php
+
+# Bot pengambil konten untuk pelatihan model, blokir bila tidak diinginkan.
+# Hapus tanda pagar pada baris di bawah untuk mengaktifkan.
+# User-agent: GPTBot
+# Disallow: /
+# User-agent: CCBot
+# Disallow: /
+
+Sitemap: https://callalily.party/sitemap.xml

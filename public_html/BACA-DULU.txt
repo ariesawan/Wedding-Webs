@@ -1,0 +1,69 @@
+CALLALILY CMS — paket pemasangan
+=================================
+
+Ekstrak SELURUH isi paket ini di dalam folder:
+    ~/domains/callalily.party/public_html/
+
+Strukturnya sudah sesuai, jadi berkas langsung mendarat di tempatnya.
+Tidak perlu memindahkan apa pun, tidak perlu pasang.php.
+
+Yang akan tertimpa:
+    admin/klien.php
+    admin/_layout.php
+    inc/auth.php
+    assets/halaman.css
+    form.php
+
+Yang baru (belum pernah ada):
+    admin/penawaran.php
+    admin/template-penawaran.php
+    admin/pengguna.php
+    db/migration-v19.sql  v20  v21
+
+BACKUP DULU sebelum ekstrak:
+    cd ~/domains/callalily.party
+    tar czf ~/backup-sebelum-v21-$(date +%F).tar.gz public_html
+    mysqldump -u USER -p tuguasri_wo > ~/backup-db-$(date +%F).sql
+
+Simpan backup DI LUAR public_html. Berkas di dalamnya bisa diunduh
+siapa pun lewat peramban — termasuk inc/config.php yang memuat
+kata sandi database.
+
+SETELAH EKSTRAK
+---------------
+1. Periksa izin berkas. Unggahan File Manager sering mendarat 600;
+   kalau PHP berjalan sebagai user lain, berkas itu tidak terbaca
+   dan halamannya 403 atau 500 padahal isinya sudah benar.
+
+       cd ~/domains/callalily.party/public_html
+       chmod 644 form.php admin/*.php inc/*.php assets/*.css db/*.sql
+
+2. Jalankan migrasi lewat phpMyAdmin, tab SQL, BERURUTAN:
+
+       db/migration-v19.sql    (tawar-menawar pada penawaran)
+       db/migration-v20.sql    (template penawaran + 1 contoh)
+       db/migration-v21.sql    (tamu akad/resepsi + kategori WO)
+
+   Ketiganya aman dijalankan ulang. Kalau v19 sudah pernah jalan,
+   dia akan bilang "sudah ada" dan melanjutkan.
+
+   Catatan: v17b dan v18 tidak disertakan karena sudah pernah jalan
+   di servermu. Kalau ragu, periksa:
+
+       SHOW COLUMNS FROM users LIKE 'role';
+       -- harus memuat admin_early
+
+3. Muat ulang panel. Yang harus terlihat:
+       - menu Template dan Pengguna di rail
+       - Chat dan Sesi WA sudah hilang
+       - label peran di bawah namamu
+
+BERSIH-BERSIH
+-------------
+Hapus dari public_html kalau masih ada — semuanya bisa diunduh publik:
+
+    backup.zip      files.zip
+    pasang.php      cek-versi.php
+
+Lalu kosongkan Trash Bin DirectAdmin; berkas yang dihapus masih
+tersimpan di sana.

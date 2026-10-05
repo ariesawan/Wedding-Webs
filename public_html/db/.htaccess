@@ -1,0 +1,2 @@
+# Berkas ini hanya boleh dipanggil dari PHP, tidak pernah langsung lewat URL.
+Require all denied

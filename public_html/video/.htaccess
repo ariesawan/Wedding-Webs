@@ -1,0 +1,14 @@
+# Berkas yang diunggah TIDAK BOLEH dieksekusi sebagai skrip.
+# Ini pertahanan penting: kalau suatu saat ada celah pada validasi upload,
+# penyerang tetap tidak bisa menjalankan web shell dari direktori ini.
+Options -ExecCGI -Indexes
+RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .php8 .phps .cgi .pl .py
+AddType text/plain .php .phtml .php3 .php4 .php5 .php7 .php8 .phps .cgi .pl .py
+
+<IfModule mod_php.c>
+  php_flag engine off
+</IfModule>
+
+<FilesMatch "\.(php|phtml|php[0-9]|phps|cgi|pl|py|sh|htaccess)$">
+  Require all denied
+</FilesMatch>
