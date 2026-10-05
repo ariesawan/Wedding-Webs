@@ -3,184 +3,230 @@ require_once __DIR__ . '/_layout.php';
 require_once __DIR__ . '/../inc/pipeline.php';
 require_once __DIR__ . '/../inc/google.php';
 require_once __DIR__ . '/../inc/zoom.php';
-require_once __DIR__ . '/../inc/pipeline.php';
 $user = requireLogin();
 
-$c = fn(string $sql) => (float) (one($sql)['v'] ?? 0);
+/**
+ * RINGKASAN — layar pertama setelah masuk.
+ *
+ * Disusun menurut peran. Admin early tidak perlu melihat tagihan termin,
+ * admin office tidak perlu melihat prospek yang belum tentu jadi, dan owner
+ * melihat semuanya. Dulu ketiganya melihat layar yang sama — enam angka yang
+ * patah jadi 5 + 1 baris, dan hitungan "Prospek aktif" masih memakai tahap
+ * 'meeting' dan 'negosiasi' yang sudah dihapus sejak v8, sehingga klien di
+ * tahap Price list dan Spesifikasi tidak pernah terhitung.
+ */
+$peran  = $user['role'] ?? '';
+$early  = $peran === 'admin_early';
+$office = in_array($peran, ['admin_office', 'editor'], true);
+$owner  = !$early && !$office;
 
-$stats = [
-    'perlu'    => (int) $c("SELECT COUNT(*) v FROM clients WHERE next_action_at <= CURDATE() AND stage NOT IN ('selesai','batal')"),
-    'prospek'  => (int) $c("SELECT COUNT(*) v FROM clients WHERE stage IN ('baru','meeting','penawaran','negosiasi')"),
-    'deal'     => (int) $c("SELECT COUNT(*) v FROM clients WHERE stage IN ('deal','persiapan','harih')"),
-    'meeting'  => (int) $c("SELECT COUNT(*) v FROM meetings WHERE status='scheduled' AND start_at >= NOW()"),
-    'terkunci' => $c("SELECT COALESCE(SUM(deal_value),0) v FROM clients WHERE stage IN ('deal','persiapan','harih')"),
-    'telat'    => $c("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE paid_at IS NULL AND due_date < CURDATE()"),
-];
+$PRA_DEAL   = ['baru', 'pricelist', 'spesifikasi', 'penawaran'];
+$PASCA_DEAL = ['deal', 'persiapan', 'harih'];
+$tahapKu    = $early ? $PRA_DEAL : ($office ? $PASCA_DEAL : PIPE_ACTIVE);
+$inKu       = "'" . implode("','", $tahapKu) . "'";
+$inPra      = "'" . implode("','", $PRA_DEAL) . "'";
+$inPasca    = "'" . implode("','", $PASCA_DEAL) . "'";
 
-// Yang harus dikerjakan hari ini — disatukan dari tiga sumber.
+$v = fn(string $sql) => (float) (one($sql)['v'] ?? 0);
+
+// ---- Angka utama: empat, satu baris, berbeda per peran ----
+$perlu = (int) $v("SELECT COUNT(*) v FROM clients WHERE stage IN ($inKu)
+                    AND next_action_at IS NOT NULL AND next_action_at <= CURDATE()");
+$stat = [['n' => $perlu, 'd' => 'Perlu ditindak hari ini', 'aksen' => true, 'href' => 'klien.php']];
+if (!$office) {
+    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE stage IN ($inPra)"), 'd' => 'Prospek aktif', 'href' => 'klien.php'];
+}
+if ($early) {
+    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM meetings WHERE status='scheduled' AND start_at >= NOW()"), 'd' => 'Pertemuan mendatang', 'href' => 'jadwal.php'];
+    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE contract_signed_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')"), 'd' => 'Deal bulan ini', 'href' => 'klien.php?tahap=deal'];
+}
+if ($office) {
+    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE stage IN ($inPasca)"), 'd' => 'Acara berjalan', 'href' => 'klien.php'];
+    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE stage IN ($inPasca) AND data_lengkap_at IS NULL"), 'd' => 'Data lengkap kosong', 'href' => 'klien.php?pic=dl_kosong'];
+}
+if (!$early) {
+    if ($owner) $stat[] = ['n' => rupiah($v("SELECT COALESCE(SUM(deal_value),0) v FROM clients WHERE stage IN ($inPasca)"), true) ?: '—', 'd' => 'Nilai terkunci', 'kecil' => true, 'href' => 'klien.php'];
+    $telat = $v("SELECT COALESCE(SUM(amount),0) v FROM payments p JOIN clients c ON c.id = p.client_id
+                 WHERE p.paid_at IS NULL AND p.due_date < CURDATE() AND c.stage <> 'batal'");
+    $stat[] = ['n' => $telat > 0 ? rupiah($telat, true) : '—', 'd' => 'Tagihan lewat tempo', 'kecil' => true, 'merah' => $telat > 0];
+}
+
+// ---- Corong tahap ----
+$corong = [];
+foreach (all("SELECT stage, COUNT(*) n FROM clients WHERE stage IN ($inKu) GROUP BY stage") as $r) $corong[$r['stage']] = (int) $r['n'];
+
+// ---- Daftar "hari ini" ----
 $tindakan = all("SELECT id, name, partner_name, next_action, next_action_at, stage FROM clients
-                 WHERE next_action_at <= CURDATE() AND stage NOT IN ('selesai','batal')
+                 WHERE stage IN ($inKu) AND next_action_at IS NOT NULL AND next_action_at <= CURDATE()
                  ORDER BY next_action_at ASC LIMIT 8");
-$tanpaAksi = all("SELECT id, name, partner_name, stage FROM clients
-                  WHERE (next_action_at IS NULL OR next_action = '')
-                    AND stage IN ('baru','meeting','penawaran','negosiasi') LIMIT 6");
-$tugasTelat = all("SELECT t.id, t.title, t.due_date, c.id cid, c.name FROM client_tasks t
+$tanpaAksi = $office ? [] : all("SELECT id, name, partner_name, stage FROM clients
+                  WHERE (next_action_at IS NULL OR next_action = '') AND stage IN ($inPra) LIMIT 6");
+$catatHasil = $office ? [] : all("SELECT id, client_name, start_at FROM meetings
+                   WHERE status='scheduled' AND start_at < NOW() AND outcome = '' ORDER BY start_at DESC LIMIT 5");
+$tugasTelat = $early ? [] : all("SELECT t.id, t.title, t.due_date, c.id cid, c.name FROM client_tasks t
                    JOIN clients c ON c.id = t.client_id
                    WHERE t.done_at IS NULL AND t.due_date <= CURDATE() AND c.stage NOT IN ('selesai','batal')
                    ORDER BY t.due_date ASC LIMIT 8");
-$tagihan = all("SELECT p.id, p.label, p.amount, p.due_date, c.id cid, c.name FROM payments p
+$tagihan = $early ? [] : all("SELECT p.id, p.label, p.amount, p.due_date, c.id cid, c.name FROM payments p
                 JOIN clients c ON c.id = p.client_id
-                WHERE p.paid_at IS NULL AND p.due_date <= CURDATE() ORDER BY p.due_date ASC LIMIT 6");
+                WHERE p.paid_at IS NULL AND p.due_date <= DATE_ADD(CURDATE(), INTERVAL 3 DAY) AND c.stage <> 'batal'
+                ORDER BY p.due_date ASC LIMIT 6");
 $nextMeet = all("SELECT * FROM meetings WHERE status='scheduled' AND start_at >= NOW() ORDER BY start_at ASC LIMIT 4");
-$hariH    = all("SELECT id, name, partner_name, wedding_date, venue FROM clients
-                 WHERE stage IN ('deal','persiapan','harih') AND wedding_date >= CURDATE()
+$hariH    = $early ? [] : all("SELECT id, name, partner_name, wedding_date, venue FROM clients
+                 WHERE stage IN ($inPasca) AND wedding_date >= CURDATE()
                  ORDER BY wedding_date ASC LIMIT 5");
-$catatHasil = all("SELECT id, client_name, start_at FROM meetings
-                   WHERE status='scheduled' AND start_at < NOW() AND outcome = '' ORDER BY start_at DESC LIMIT 5");
-$syncBad  = all("SELECT id, client_name, sync_error FROM meetings WHERE sync_error IS NOT NULL AND status='scheduled' LIMIT 3");
-$lowSeo   = all("SELECT id, title, seo_score FROM posts WHERE status='published' AND seo_score < 70 ORDER BY seo_score ASC LIMIT 3");
+$syncBad  = $owner ? all("SELECT id, client_name, sync_error FROM meetings WHERE sync_error IS NOT NULL AND status='scheduled' LIMIT 3") : [];
+$lowSeo   = $owner ? all("SELECT id, title, seo_score FROM posts WHERE status='published' AND seo_score < 70 ORDER BY seo_score ASC LIMIT 3") : [];
+
+$adaHariIni = $tindakan || $tanpaAksi || $tugasTelat || $tagihan || $catatHasil;
 
 adminHead('Ringkasan', '');
+$aksiAtas = ($office ? '' : '<a class="btn solid" href="klien.php?new=1">+ Klien baru</a> ')
+          . '<a class="btn ghost" href="jadwal.php?new=1">+ Jadwalkan</a>';
 pageHead('Selamat datang, ' . explode(' ', $user['name'])[0],
-         hariID('now') . ', ' . tanggalID('now') . '. Yang paling atas adalah yang paling perlu disentuh hari ini.');
+         hariID('now') . ', ' . tanggalID('now') . ' · ' . roleLabel($peran)
+         . ($early ? ' — prospek sampai deal.' : ($office ? ' — klien setelah deal.' : '.')),
+         $aksiAtas);
 ?>
 
-<div class="grid g4">
-  <div class="stat accent"><span class="n"><?= $stats['perlu'] ?></span><span class="d">Perlu ditindak</span></div>
-  <div class="stat"><span class="n"><?= $stats['prospek'] ?></span><span class="d">Prospek aktif</span></div>
-  <div class="stat"><span class="n"><?= $stats['deal'] ?></span><span class="d">Sudah deal</span></div>
-  <div class="stat"><span class="n"><?= $stats['meeting'] ?></span><span class="d">Pertemuan mendatang</span></div>
-  <div class="stat"><span class="n" style="font-size:23px"><?= rupiah($stats['terkunci'], true) ?></span><span class="d">Nilai terkunci</span></div>
-  <div class="stat"><span class="n" style="font-size:23px;<?= $stats['telat'] > 0 ? 'color:var(--rose)' : '' ?>"><?= $stats['telat'] ? rupiah($stats['telat'], true) : '—' ?></span><span class="d">Tagihan lewat tempo</span></div>
+<div class="stat-baris">
+  <?php foreach (array_slice($stat, 0, 4) as $s): ?>
+    <a class="stat<?= !empty($s['aksen']) ? ' accent' : '' ?>" href="<?= e($s['href'] ?? '#') ?>">
+      <span class="n" style="<?= !empty($s['kecil']) ? 'font-size:24px;' : '' ?><?= !empty($s['merah']) ? 'color:var(--rose)' : '' ?>"><?= e((string) $s['n']) ?></span>
+      <span class="d"><?= e($s['d']) ?></span>
+    </a>
+  <?php endforeach; ?>
 </div>
 
-<?php if ($tindakan || $tanpaAksi || $tugasTelat || $tagihan || $catatHasil): ?>
-<div class="card" style="margin-top:18px;border-color:rgba(233,168,92,.4)">
-  <h2>Hari ini</h2>
-  <p class="sub">Daftar ini kosong kalau semuanya sudah tertangani.</p>
+<div class="card corong-kartu">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+    <h2 style="margin:0">Jalur klien</h2>
+    <a class="mono" style="font-size:11px;color:var(--ember)" href="klien.php">Buka papan →</a>
+  </div>
+  <div class="corong">
+    <?php foreach ($tahapKu as $st): $n = $corong[$st] ?? 0; ?>
+      <a href="klien.php?tahap=<?= $st ?>" class="<?= $n ? 'isi' : '' ?>">
+        <b><?= $n ?></b><span><?= e(stageLabel($st)) ?></span>
+      </a>
+    <?php endforeach; ?>
+  </div>
+</div>
 
-  <?php if ($tindakan): ?>
-    <span class="lab">Tindak lanjut jatuh tempo</span>
-    <table class="tbl" style="margin:9px 0 20px">
-      <?php foreach ($tindakan as $t): ?>
-        <tr>
-          <td data-l="Klien" style="padding:10px 0"><b><?= e($t['name'] . ($t['partner_name'] ? ' & ' . $t['partner_name'] : '')) ?></b><br>
-            <span class="muted mono"><?= e(stageLabel($t['stage'])) ?></span></td>
-          <td data-l="Tindakan"><?= e($t['next_action'] ?: '—') ?><br>
-            <span class="muted mono" style="color:var(--rose)"><?= tanggalID($t['next_action_at']) ?></span></td>
-          <td class="actions"><a class="btn sm ghost" href="klien.php?id=<?= $t['id'] ?>">Buka</a></td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-  <?php endif; ?>
+<div class="grid dash">
+  <div class="card hari-ini">
+    <h2>Hari ini</h2>
+    <?php if (!$adaHariIni): ?>
+      <div class="empty" style="padding:30px 12px 18px">
+        <p>Tidak ada yang mendesak</p>
+        <span>Semua tindak lanjut<?= $early ? '' : ', langkah persiapan, dan tagihan' ?> sedang pada jalurnya.</span>
+      </div>
+    <?php endif; ?>
 
-  <?php if ($catatHasil): ?>
-    <span class="lab">Pertemuan sudah lewat, hasilnya belum dicatat</span>
-    <table class="tbl" style="margin:9px 0 20px">
-      <?php foreach ($catatHasil as $m): ?>
-        <tr>
-          <td data-l="Klien" style="padding:10px 0"><b><?= e($m['client_name']) ?></b><br>
-            <span class="muted mono"><?= tanggalID($m['start_at']) ?></span></td>
-          <td class="actions"><a class="btn sm solid" href="jadwal.php?edit=<?= $m['id'] ?>">Catat hasil</a></td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-  <?php endif; ?>
+    <?php if ($tindakan): ?>
+      <span class="lab">Tindak lanjut jatuh tempo</span>
+      <ul class="daftar">
+        <?php foreach ($tindakan as $t): $lewat = $t['next_action_at'] < date('Y-m-d'); ?>
+          <li>
+            <a href="klien.php?id=<?= $t['id'] ?>">
+              <b><?= e($t['name'] . ($t['partner_name'] ? ' & ' . $t['partner_name'] : '')) ?></b>
+              <span><?= e($t['next_action'] ?: stageNext($t['stage'])) ?></span>
+            </a>
+            <span class="pill draft"><?= e(stageLabel($t['stage'])) ?></span>
+            <span class="kapan<?= $lewat ? ' telat' : '' ?>"><?= e(labelHari($t['next_action_at'])) ?></span>
+          </li>
+        <?php endforeach; ?>
+      </ul>
+    <?php endif; ?>
 
-  <?php if ($tanpaAksi): ?>
-    <span class="lab">Prospek tanpa tindakan berikutnya</span>
-    <p style="font-size:12.5px;color:var(--ivory-38);margin:4px 0 9px">Ini penyebab prospek menguap — tidak ada yang tahu siapa harus dihubungi kapan.</p>
-    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:20px">
-      <?php foreach ($tanpaAksi as $t): ?>
-        <a class="btn sm ghost" href="klien.php?id=<?= $t['id'] ?>"><?= e($t['name']) ?></a>
-      <?php endforeach; ?>
+    <?php if ($catatHasil): ?>
+      <span class="lab">Pertemuan lewat, hasil belum dicatat</span>
+      <ul class="daftar">
+        <?php foreach ($catatHasil as $m): ?>
+          <li>
+            <a href="jadwal.php?edit=<?= $m['id'] ?>"><b><?= e($m['client_name']) ?></b><span>Catat hasilnya — menentukan langkah klien berikutnya</span></a>
+            <span class="kapan telat"><?= tanggalID(substr($m['start_at'], 0, 10)) ?></span>
+          </li>
+        <?php endforeach; ?>
+      </ul>
+    <?php endif; ?>
+
+    <?php if ($tugasTelat): ?>
+      <span class="lab">Langkah persiapan lewat tempo</span>
+      <ul class="daftar">
+        <?php foreach ($tugasTelat as $t): ?>
+          <li>
+            <a href="klien.php?id=<?= $t['cid'] ?>#checklist"><b><?= e($t['title']) ?></b><span><?= e($t['name']) ?></span></a>
+            <span class="kapan telat"><?= e(labelHari($t['due_date'])) ?></span>
+          </li>
+        <?php endforeach; ?>
+      </ul>
+    <?php endif; ?>
+
+    <?php if ($tagihan): ?>
+      <span class="lab">Tagihan jatuh tempo (3 hari ke depan)</span>
+      <ul class="daftar">
+        <?php foreach ($tagihan as $p): $lewat = $p['due_date'] < date('Y-m-d'); ?>
+          <li>
+            <a href="klien.php?id=<?= $p['cid'] ?>#uang"><b><?= e($p['name']) ?></b><span><?= e($p['label']) ?> · <?= rupiah((float) $p['amount']) ?></span></a>
+            <span class="kapan<?= $lewat ? ' telat' : '' ?>"><?= e(labelHari($p['due_date'])) ?></span>
+          </li>
+        <?php endforeach; ?>
+      </ul>
+    <?php endif; ?>
+
+    <?php if ($tanpaAksi): ?>
+      <span class="lab">Prospek tanpa tindakan berikutnya</span>
+      <div style="display:flex;gap:7px;flex-wrap:wrap;margin:9px 0 4px">
+        <?php foreach ($tanpaAksi as $t): ?>
+          <a class="btn sm ghost" href="klien.php?id=<?= $t['id'] ?>"><?= e($t['name']) ?></a>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+  </div>
+
+  <div class="dash-samping">
+    <div class="card">
+      <h2>Pertemuan terdekat</h2>
+      <?php if (!$nextMeet): ?>
+        <p class="sub" style="margin:0">Belum ada pertemuan terjadwal. <a href="jadwal.php?new=1" style="color:var(--ember)">Jadwalkan →</a></p>
+      <?php else: ?>
+        <ul class="daftar">
+          <?php foreach ($nextMeet as $m): ?>
+            <li>
+              <a href="jadwal.php?edit=<?= (int) $m['id'] ?>"><b><?= e($m['client_name']) ?></b>
+                <span><?= ['meet'=>'Google Meet','zoom'=>'Zoom','onsite'=>'Tatap muka','phone'=>'Telepon'][$m['mode']] ?? '' ?></span></a>
+              <span class="kapan"><?= date('d/m', strtotime($m['start_at'])) ?> · <?= date('H.i', strtotime($m['start_at'])) ?></span>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      <?php endif; ?>
     </div>
-  <?php endif; ?>
 
-  <?php if ($tugasTelat): ?>
-    <span class="lab">Langkah persiapan lewat tempo</span>
-    <table class="tbl" style="margin:9px 0 20px">
-      <?php foreach ($tugasTelat as $t): ?>
-        <tr>
-          <td data-l="Langkah" style="padding:10px 0"><b><?= e($t['title']) ?></b><br>
-            <span class="muted mono"><?= e($t['name']) ?> · <?= tanggalID($t['due_date']) ?></span></td>
-          <td class="actions"><a class="btn sm ghost" href="klien.php?id=<?= $t['cid'] ?>">Buka</a></td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-  <?php endif; ?>
-
-  <?php if ($tagihan): ?>
-    <span class="lab">Tagihan jatuh tempo</span>
-    <table class="tbl" style="margin:9px 0 0">
-      <?php foreach ($tagihan as $p): ?>
-        <tr>
-          <td data-l="Tagihan" style="padding:10px 0"><b><?= e($p['name']) ?></b> — <?= e($p['label']) ?><br>
-            <span class="muted mono"><?= tanggalID($p['due_date']) ?></span></td>
-          <td data-l="Nominal" class="num" style="color:var(--rose)"><?= rupiah((float) $p['amount']) ?></td>
-          <td class="actions"><a class="btn sm ghost" href="klien.php?id=<?= $p['cid'] ?>">Buka</a></td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-  <?php endif; ?>
-</div>
-<?php else: ?>
-<div class="card" style="margin-top:18px">
-  <div class="empty" style="padding:36px 16px">
-    <p>Tidak ada yang mendesak hari ini</p>
-    <span>Semua tindak lanjut, langkah persiapan, dan tagihan sedang pada jalurnya.</span>
-  </div>
-</div>
-<?php endif; ?>
-
-<div class="grid g2" style="margin-top:18px;align-items:start">
-  <div class="card">
-    <h2>Pertemuan terdekat</h2>
-    <?php if (!$nextMeet): ?>
-      <div class="empty" style="padding:30px 16px">
-        <p>Belum ada pertemuan terjadwal</p>
-        <span>Buat jadwal, dan undangan kalender langsung terkirim ke email klien.</span>
-        <a class="btn solid" href="jadwal.php?new=1">Jadwalkan</a>
-      </div>
-    <?php else: ?>
-      <table class="tbl">
-        <?php foreach ($nextMeet as $m): ?>
-          <tr>
-            <td data-l="Waktu" class="num" style="width:120px"><b style="color:var(--ivory)"><?= date('d M', strtotime($m['start_at'])) ?></b><br><?= date('H.i', strtotime($m['start_at'])) ?> WIB</td>
-            <td data-l="Klien"><b><?= e($m['client_name']) ?></b><br><span class="muted mono"><?= ['meet'=>'Google Meet','zoom'=>'Zoom','onsite'=>'Tatap muka','phone'=>'Telepon'][$m['mode']] ?></span></td>
-            <td class="actions"><a class="btn sm ghost" href="jadwal.php?edit=<?= (int) $m['id'] ?>">Buka</a></td>
-          </tr>
-        <?php endforeach; ?>
-      </table>
-    <?php endif; ?>
-  </div>
-
-  <div class="card">
-    <h2>Hari-H terdekat</h2>
-    <p class="sub">Acara yang sudah terikat kontrak.</p>
-    <?php if (!$hariH): ?>
-      <div class="empty" style="padding:30px 16px">
-        <p>Belum ada acara terjadwal</p>
-        <span>Klien yang masuk tahap deal dan punya tanggal nikah akan muncul di sini.</span>
-      </div>
-    <?php else: ?>
-      <table class="tbl">
-        <?php foreach ($hariH as $h): $d = (int) ceil((strtotime($h['wedding_date']) - strtotime('today')) / 86400); ?>
-          <tr>
-            <td data-l="Tanggal" class="num" style="width:120px"><b style="color:var(--ivory)"><?= date('d M Y', strtotime($h['wedding_date'])) ?></b><br><?= $d === 0 ? 'hari ini' : "H-$d" ?></td>
-            <td data-l="Pasangan"><b><?= e($h['name'] . ($h['partner_name'] ? ' & ' . $h['partner_name'] : '')) ?></b><br><span class="muted mono"><?= e($h['venue'] ?: '—') ?></span></td>
-            <td class="actions"><a class="btn sm ghost" href="klien.php?id=<?= $h['id'] ?>">Buka</a></td>
-          </tr>
-        <?php endforeach; ?>
-      </table>
+    <?php if (!$early): ?>
+    <div class="card">
+      <h2>Hari-H terdekat</h2>
+      <?php if (!$hariH): ?>
+        <p class="sub" style="margin:0">Klien yang sudah deal dan punya tanggal nikah muncul di sini.</p>
+      <?php else: ?>
+        <ul class="daftar">
+          <?php foreach ($hariH as $h): $d = hariKe($h['wedding_date']); ?>
+            <li>
+              <a href="klien.php?id=<?= $h['id'] ?>"><b><?= e($h['name'] . ($h['partner_name'] ? ' & ' . $h['partner_name'] : '')) ?></b>
+                <span><?= e($h['venue'] ?: '—') ?></span></a>
+              <span class="kapan"><?= $d === 0 ? 'hari ini' : 'H-' . $d ?></span>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      <?php endif; ?>
+    </div>
     <?php endif; ?>
   </div>
 </div>
 
-<?php if (!googleConnected() || $syncBad || $lowSeo): ?>
-<div class="card">
-  <h2>Perlu perhatian</h2>
-  <ul style="list-style:none;display:grid;gap:10px;font-size:14px;color:var(--ivory-60)">
+<?php if ($owner && (!googleConnected() || !zoomConfigured() || $syncBad || $lowSeo)): ?>
+<details class="card perhatian">
+  <summary><h2 style="display:inline">Perlu perhatian</h2> <span class="lab" style="margin-left:8px">pengaturan</span></summary>
+  <ul style="list-style:none;display:grid;gap:10px;font-size:14px;color:var(--ivory-60);margin-top:12px">
     <?php if (!googleConnected()): ?>
       <li>◦ Google Calendar belum terhubung — undangan ke klien tidak terkirim. <a href="integrasi.php" style="color:var(--ember)">Hubungkan →</a></li>
     <?php endif; ?>
@@ -196,7 +242,7 @@ pageHead('Selamat datang, ' . explode(' ', $user['name'])[0],
           <a href="blog.php?edit=<?= (int) $p['id'] ?>" style="color:var(--ember)">Perbaiki →</a></li>
     <?php endforeach; ?>
   </ul>
-</div>
+</details>
 <?php endif; ?>
 
 <?php adminFoot();

@@ -12,11 +12,18 @@ function adminHead(string $title, string $active = ''): void
     // persis sama ($followUp dan $overdue) — dan semuanya jalan di setiap
     // halaman panel, sebelum sebaris HTML pun keluar. Satu round-trip jauh
     // lebih murah daripada lima, terutama di shared hosting.
+    // Lencana Klien mengikuti bagian masing-masing peran: admin office tidak
+    // perlu melihat angka merah dari prospek yang bukan pegangannya.
+    $lingkup = match ($u['role'] ?? '') {
+        'admin_early'            => "stage IN ('baru','pricelist','spesifikasi','penawaran')",
+        'admin_office', 'editor' => "stage IN ('deal','persiapan','harih')",
+        default                  => "stage NOT IN ('selesai','batal')",
+    };
     $b = one("SELECT
         (SELECT COUNT(*) FROM meetings WHERE status='scheduled' AND start_at >= NOW()) AS temu,
         (SELECT COUNT(*) FROM posts WHERE status='draft')                              AS draf,
         (SELECT COUNT(*) FROM clients
-           WHERE stage NOT IN ('selesai','batal')
+           WHERE $lingkup
              AND next_action_at IS NOT NULL AND next_action_at <= CURDATE())            AS telat,
         (SELECT COALESCE(SUM(unread),0) FROM wa_chats WHERE archived = 0)               AS chat,
         (SELECT COUNT(*) FROM clients c
@@ -33,25 +40,29 @@ function adminHead(string $title, string $active = ''): void
     // sejak awal.
     $belumAnalisa    = (int) ($b['analisa'] ?? 0);
 
+    // Dikelompokkan menurut pekerjaan. Delapan belas menu dalam satu daftar
+    // membuat yang dipakai setiap hari (Klien, Jadwal) tenggelam di antara
+    // yang disentuh sebulan sekali (SEO, Bahasa, Integrasi).
     $menu = [
-        ['',           'index.php',      'Ringkasan',   '◈', 0],
-        ['klien',      'klien.php',      'Klien',       '◐', $overdue],
-        ['jadwal',     'jadwal.php',     'Jadwal',      '◷', $pendingMeetings],
-        ['event',      'event.php',      'Event',       '❖', 0],
-        ['vendor',     'vendor.php',     'Vendor',      '⌂', 0],
-        ['vendor-kategori','vendor-kategori.php','Kategori',  '◇', 0],
-        ['inbox',      'inbox.php',      'Kotak masuk', '✉', 0],
-        ['penyusun',   'penyusun.php',   'Penyusun',    '◐', 0],
-        ['template-penawaran', 'template-penawaran.php', 'Template', '▤', 0],
-        ['galeri',     'galeri.php',     'Galeri',      '▤', 0],
-        ['blog',       'blog.php',       'Artikel',     '❋', $drafts],
-        ['analisa',    'analisa.php',    'Analisa',     '◭', $belumAnalisa],
-        ['seo',        'seo.php',        'SEO',         '◎', 0],
-        ['bahasa',     'bahasa.php',     'Bahasa',      '⇄', 0],
-        ['sheet',      'sheet.php',      'Spreadsheet', '▦', 0],
-        ['integrasi',  'integrasi.php',  'Integrasi',   '⚯', 0],
-        ['pengaturan', 'pengaturan.php', 'Pengaturan',  '⚙', 0],
-        ['pengguna',   'pengguna.php',   'Pengguna',    '☖', 0],
+        // kunci, berkas, label, ikon, lencana, kelompok
+        ['',           'index.php',      'Ringkasan',   '◈', 0,             ''],
+        ['klien',      'klien.php',      'Klien',       '◐', $overdue,      ''],
+        ['jadwal',     'jadwal.php',     'Jadwal',      '◷', $pendingMeetings, ''],
+        ['inbox',      'inbox.php',      'Kotak masuk', '✉', 0,             ''],
+        ['template-penawaran', 'template-penawaran.php', 'Template penawaran', '❏', 0, 'Penjualan'],
+        ['analisa',    'analisa.php',    'Analisa',     '◭', $belumAnalisa, 'Penjualan'],
+        ['vendor',     'vendor.php',     'Vendor',      '⌂', 0,             'Produksi'],
+        ['vendor-kategori','vendor-kategori.php','Kategori vendor', '◇', 0, 'Produksi'],
+        ['event',      'event.php',      'Event',       '❖', 0,             'Produksi'],
+        ['penyusun',   'penyusun.php',   'Penyusun brief', '✎', 0,          'Situs'],
+        ['galeri',     'galeri.php',     'Galeri',      '▣', 0,             'Situs'],
+        ['blog',       'blog.php',       'Artikel',     '❋', $drafts,       'Situs'],
+        ['seo',        'seo.php',        'SEO',         '◎', 0,             'Situs'],
+        ['bahasa',     'bahasa.php',     'Bahasa',      '⇄', 0,             'Situs'],
+        ['sheet',      'sheet.php',      'Spreadsheet', '▦', 0,             'Sistem'],
+        ['integrasi',  'integrasi.php',  'Integrasi',   '⚯', 0,             'Sistem'],
+        ['pengaturan', 'pengaturan.php', 'Pengaturan',  '⚙', 0,             'Sistem'],
+        ['pengguna',   'pengguna.php',   'Pengguna',    '☖', 0,             'Sistem'],
     ];
 
     // Rail disaring menurut peran. Ini kosmetik saja — penjagaan yang
@@ -60,6 +71,7 @@ function adminHead(string $title, string $active = ''): void
     // cuma menyembunyikan pintu, bukan menguncinya.
     $peran = $u['role'] ?? '';
     $menu  = array_values(array_filter($menu, fn($m) => bolehAkses($peran, basename($m[1], '.php'))));
+    $skemaGalat = isOwner() ? (string) setting('skema_galat', '') : '';
     ?><!DOCTYPE html>
 <html lang="id"<?= themeAttr() ?>>
 <head>
@@ -82,7 +94,8 @@ function adminHead(string $title, string $active = ''): void
 <aside class="rail" id="rail">
   <a class="brand" href="index.php">Callalily<small>PANEL PRODUKSI</small></a>
   <nav>
-    <?php foreach ($menu as [$key, $href, $label, $ic, $badge]): ?>
+    <?php $grupLalu = null; foreach ($menu as [$key, $href, $label, $ic, $badge, $grup]):
+      if ($grup !== $grupLalu) { if ($grup !== '') echo '<span class="grup">' . e($grup) . '</span>'; $grupLalu = $grup; } ?>
       <a href="<?= $href ?>"<?= $active === $key ? ' class="on" aria-current="page"' : '' ?>>
         <span class="ic" aria-hidden="true"><?= $ic ?></span><?= e($label) ?>
         <?php if ($badge > 0): ?><span class="badge"><?= $badge ?></span><?php endif; ?>
@@ -170,6 +183,10 @@ function adminHead(string $title, string $active = ''): void
 </script>
 <main class="wrap">
 <?php
+    if ($skemaGalat !== '') {
+        echo '<div class="flash warn"><span>Struktur database belum bisa diperbarui otomatis: ' . e($skemaGalat)
+           . '. Jalankan <b>db/migration-v22.sql</b> lewat phpMyAdmin, lalu muat ulang.</span></div>';
+    }
     if ($f = flash()) {
         $cls = $f['type'] === 'err' ? 'err' : ($f['type'] === 'warn' ? 'warn' : 'ok');
         echo '<div class="flash ' . $cls . '"><span>' . nl2br(e($f['msg'])) . '</span></div>';

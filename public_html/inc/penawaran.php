@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/chat.php';
+require_once __DIR__ . '/pipeline.php';
 
 /**
  * ============================================================
@@ -36,7 +37,9 @@ const QUOTE_PRIORITAS = [
 function quoteNomor(int $clientId): string
 {
     $prefix = setting('quote_prefix', 'CLP');
-    $urut   = (int) (one("SELECT COUNT(*) c FROM quotes")['c'] ?? 0) + 1;
+    // MAX(id), bukan COUNT(*): begitu satu penawaran dihapus, COUNT mundur
+    // satu dan nomor berikutnya kembar dengan yang sudah dipegang klien.
+    $urut   = (int) (one("SELECT COALESCE(MAX(id),0) c FROM quotes")['c'] ?? 0) + 1;
     return sprintf('%s/%s/%04d/%d', $prefix, date('ym'), $urut, $clientId);
 }
 
@@ -191,6 +194,35 @@ function quoteTeksWA(int $quoteId): string
 }
 
 /**
+ * Tandai penawaran terkirim, lalu majukan tahap kliennya.
+ *
+ * Satu pintu untuk dua cara kirim. Sebelumnya tahap hanya maju kalau
+ * dikirim lewat WhatsApp otomatis; "Tandai terkirim" untuk kiriman manual —
+ * cara yang paling sering dipakai — mengubah status penawaran tapi
+ * membiarkan kliennya tertinggal di "Prospek baru", lengkap dengan tenggat
+ * "Kirim price list" yang terus menyala merah padahal sudah dikirim.
+ */
+function quoteTandaiTerkirim(int $quoteId, ?int $userId = null): array
+{
+    $qq = one("SELECT id, client_id, jenis, status, nomor, total FROM quotes WHERE id = ?", [$quoteId]);
+    if (!$qq) throw new RuntimeException('Penawaran tidak ditemukan.');
+
+    q("UPDATE quotes SET status = IF(status = 'draf', 'terkirim', status),
+                         sent_at = COALESCE(sent_at, NOW())
+       WHERE id = ?", [$quoteId]);
+
+    $pl     = $qq['jenis'] === 'pricelist';
+    $kolom  = $pl ? 'pl_sent_at' : 'penawaran_sent_at';
+    q("UPDATE clients SET $kolom = COALESCE($kolom, NOW()) WHERE id = ?", [$qq['client_id']]);
+
+    // Maju saja, tidak pernah mundur: price list tambahan untuk klien yang
+    // sudah deal tidak boleh menyeretnya kembali ke tahap Price list.
+    $r = clientMajuKe((int) $qq['client_id'], $pl ? 'pricelist' : 'penawaran', $userId,
+                      'Otomatis: ' . $qq['nomor'] . ' terkirim.');
+    return $r;
+}
+
+/**
  * Kirim penawaran ke WhatsApp klien lewat room chat.
  * Pesannya masuk riwayat room, jadi terlihat sama seperti percakapan lain.
  */
@@ -207,74 +239,110 @@ function quoteKirimWA(int $quoteId, ?int $userId = null): array
     $r = chatKirim($chatId, quoteTeksWA($quoteId), $userId, ['client_id' => (int) $qq['cid']]);
 
     if ($r['ok']) {
-        q("UPDATE quotes SET status = 'terkirim', sent_at = NOW(), sent_wa_id = ? WHERE id = ?",
-          [$r['id'] ?? null, $quoteId]);
-
-        // Tahap pipeline ikut maju — supaya tidak ada penawaran terkirim
-        // yang klien-nya masih tercatat di tahap sebelumnya.
-        $target = $qq['jenis'] === 'pricelist' ? 'pricelist' : 'penawaran';
-        $kolom  = $qq['jenis'] === 'pricelist' ? 'pl_sent_at' : 'penawaran_sent_at';
-        q("UPDATE clients SET $kolom = NOW() WHERE id = ?", [$qq['cid']]);
-
-        if (function_exists('clientSetStage')) {
-            try { clientSetStage((int) $qq['cid'], $target, $userId, 'Otomatis: ' . $qq['nomor'] . ' terkirim.'); }
-            catch (Throwable $e) { /* tahap gagal maju bukan alasan membatalkan kiriman */ }
-        }
+        q("UPDATE quotes SET sent_wa_id = ? WHERE id = ?", [$r['id'] ?? null, $quoteId]);
+        quoteTandaiTerkirim($quoteId, $userId);
     }
 
     return $r + ['chat_id' => $chatId];
 }
 
-/** Klien setuju. Tahap naik ke deal, termin ikut disusun oleh clientSetStage(). */
-function quoteCocok(int $quoteId, ?int $userId = null): void
+/**
+ * Klien setuju.
+ *
+ * Arti "setuju" bergantung jenis dokumennya:
+ *   price list → klien cocok dengan kisaran harga; lanjut menggali
+ *                spesifikasi (konsultasi, kebutuhan vendor) — BELUM deal.
+ *   penawaran  → deal. Nilai deal = total penawaran ini, termin disusun,
+ *                klien pindah ke admin office.
+ *
+ * Dulu keduanya langsung deal. Price list yang disetujui ikut menyusun
+ * termin dan menyerahkan klien ke admin office, sebelum ada spesifikasi
+ * maupun penawaran sungguhan.
+ */
+function quoteCocok(int $quoteId, ?int $userId = null): array
 {
-    $qq = one("SELECT client_id, total FROM quotes WHERE id = ?", [$quoteId]);
-    if (!$qq) return;
+    $qq = one("SELECT q.client_id, q.total, q.jenis, q.nomor, c.stage
+               FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$quoteId]);
+    if (!$qq) throw new RuntimeException('Penawaran tidak ditemukan.');
+    $cid = (int) $qq['client_id'];
 
-    q("UPDATE quotes SET status = 'cocok', decided_at = NOW() WHERE id = ?", [$quoteId]);
-    q("UPDATE clients SET deal_value = ?, contract_signed_at = NOW(),
-                          pic_role = 'admin_office', handover_at = NOW()
-       WHERE id = ?", [$qq['total'], $qq['client_id']]);
-
-    if (function_exists('clientSetStage')) {
-        clientSetStage((int) $qq['client_id'], 'deal', $userId, 'Penawaran disetujui klien.');
+    if ($qq['jenis'] === 'penawaran' && (float) $qq['total'] <= 0) {
+        throw new RuntimeException('Total penawaran ini masih Rp 0. Isi harganya dulu sebelum ditandai deal.');
     }
+    if ($qq['stage'] === 'batal') {
+        throw new RuntimeException('Klien ini tercatat tidak jadi. Aktifkan lagi dari halaman klien sebelum menandai setuju.');
+    }
+
+    q("UPDATE quotes SET status = 'cocok', decided_at = NOW(), sent_at = COALESCE(sent_at, NOW())
+       WHERE id = ?", [$quoteId]);
+
+    if ($qq['jenis'] === 'pricelist') {
+        q("UPDATE clients SET pl_sent_at = COALESCE(pl_sent_at, NOW()) WHERE id = ?", [$cid]);
+        $r = clientMajuKe($cid, 'spesifikasi', $userId, 'Price list ' . $qq['nomor'] . ' cocok.');
+        if (!$r['changed']) clientLog($cid, 'catatan', 'Price list ' . $qq['nomor'] . ' cocok', '', $userId);
+        return ['tahap' => 'spesifikasi', 'info' => $r['info']];
+    }
+
+    // Penawaran lain yang masih terbuka tidak lagi berlaku — yang dipegang
+    // klien sekarang adalah yang disetujui ini.
+    q("UPDATE quotes SET status = 'revisi'
+       WHERE client_id = ? AND id <> ? AND jenis = 'penawaran' AND status IN ('draf','terkirim')",
+      [$cid, $quoteId]);
+
+    q("UPDATE clients SET deal_value = ?, penawaran_sent_at = COALESCE(penawaran_sent_at, NOW())
+       WHERE id = ?", [$qq['total'], $cid]);
+    $r = stageSudahDeal($qq['stage'])
+       ? ['changed' => false, 'info' => []]
+       : clientSetStage($cid, 'deal', $userId, 'Penawaran ' . $qq['nomor'] . ' disetujui klien.');
+
+    // Klien yang sudah deal sebelumnya (misalnya tambahan paket): nilai
+    // kontraknya berubah, termin yang belum ada disusun.
+    if (!$r['changed']) {
+        $n = terminSusun($cid);
+        if ($n) $r['info'][] = "Termin pembayaran disusun dari template ($n termin).";
+        clientLog($cid, 'catatan', 'Penawaran ' . $qq['nomor'] . ' disetujui', rupiah((float) $qq['total']), $userId);
+    }
+    return ['tahap' => 'deal', 'info' => $r['info']];
 }
 
-/** Klien menolak — alasannya wajib, itu isi "analyze penyebab". */
-function quoteTidakCocok(int $quoteId, string $alasan, ?int $userId = null): void
+/**
+ * Klien menolak dan mundur. Alasannya wajib — itu isi "analyze penyebab".
+ *
+ * Kalau kliennya belum deal, tahapnya ikut pindah ke "Tidak jadi". Dulu
+ * hanya status penawarannya yang berubah; kliennya tetap tercatat aktif di
+ * papan dengan tenggat yang terus lewat, sehingga daftar "perlu ditindak"
+ * penuh oleh klien yang sebenarnya sudah pergi.
+ *
+ * Klien yang masih mau menawar BUKAN di sini — pakai "Klien menawar" lalu
+ * "Buat revisi".
+ */
+function quoteTidakCocok(int $quoteId, string $alasan, ?int $userId = null): array
 {
-    $qq = one("SELECT client_id, jenis FROM quotes WHERE id = ?", [$quoteId]);
-    if (!$qq) return;
+    $qq = one("SELECT q.client_id, q.jenis, q.nomor, c.stage
+               FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$quoteId]);
+    if (!$qq) throw new RuntimeException('Penawaran tidak ditemukan.');
+    $cid = (int) $qq['client_id'];
 
     q("UPDATE quotes SET status = 'tidak_cocok', decided_at = NOW(), alasan = ? WHERE id = ?",
       [mb_substr($alasan, 0, 400), $quoteId]);
-    q("UPDATE clients SET stage_batal = ? WHERE id = ?",
-      [$qq['jenis'] === 'pricelist' ? 'pricelist' : 'penawaran', $qq['client_id']]);
 
-    if (function_exists('clientLog')) {
-        clientLog((int) $qq['client_id'], 'catatan', 'Penawaran ditolak', $alasan, $userId);
+    if (!stageSudahDeal($qq['stage']) && $qq['stage'] !== 'batal') {
+        $r = clientSetStage($cid, 'batal', $userId,
+                            ($qq['jenis'] === 'pricelist' ? 'Price list' : 'Penawaran') . ' ' . $qq['nomor']
+                            . ' tidak cocok: ' . $alasan);
+        // Titik gugurnya mengikuti dokumen yang ditolak, bukan tahap papan —
+        // klien bisa saja masih tercatat "Prospek baru" saat menolak price list.
+        q("UPDATE clients SET stage_batal = ? WHERE id = ?",
+          [$qq['jenis'] === 'pricelist' ? 'pricelist' : 'penawaran', $cid]);
+        return ['batal' => true, 'info' => $r['info']];
     }
+
+    clientLog($cid, 'catatan', 'Penawaran ' . $qq['nomor'] . ' ditolak', $alasan, $userId);
+    return ['batal' => false, 'info' => []];
 }
 
-/** Termin dihitung dari template, di-snapshot ke tabel payments. */
+/** Termin dihitung dari template. Dipertahankan untuk pemanggil lama. */
 function terminDariTemplate(float $total, ?string $weddingDate): array
 {
-    $out = [];
-    foreach (all("SELECT * FROM payment_templates WHERE is_active = 1 ORDER BY urutan") as $t) {
-        $due = $t['offset_hari'] === null
-            ? date('Y-m-d', strtotime('+3 day'))
-            : ($weddingDate ? date('Y-m-d', strtotime($weddingDate . ' -' . (int) $t['offset_hari'] . ' day')) : null);
-
-        $out[] = [
-            'kode'       => $t['kode'],
-            'label'      => $t['label'],
-            'persen'     => (float) $t['persen'],
-            'amount'     => round($total * (float) $t['persen'] / 100),
-            'due_date'   => $due,
-            'wajib'      => (int) $t['wajib'],
-            'sort_order' => (int) $t['urutan'] * 10,
-        ];
-    }
-    return $out;
+    return terminKlien($total, $weddingDate);
 }

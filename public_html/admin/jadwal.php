@@ -2,7 +2,6 @@
 require_once __DIR__ . '/_layout.php';
 require_once __DIR__ . '/../inc/meeting.php';
 require_once __DIR__ . '/../inc/pipeline.php';
-require_once __DIR__ . '/../inc/pipeline.php';
 require_once __DIR__ . '/../inc/sheets.php';
 $user = requireLogin();
 
@@ -45,7 +44,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'notes'         => trim($_POST['notes'] ?? ''),
                 'event_id'      => ($_POST['event_id'] ?? '') !== '' ? (int) $_POST['event_id'] : null,
                 'client_id'     => ($_POST['client_id'] ?? '') !== '' ? (int) $_POST['client_id'] : null,
-                'client_id'     => ($_POST['client_id'] ?? '') !== '' ? (int) $_POST['client_id'] : null,
                 'created_by'    => $user['id'],
             ];
             if ($data['client_name'] === '') throw new RuntimeException('Nama klien wajib diisi.');
@@ -59,14 +57,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $id = insertId();
             }
 
-            // Sambungan antara jadwal dan pipeline: menjadwalkan pertemuan
-            // berarti prospek sudah bergerak, jadi tahapnya ikut naik.
+            // Sambungan antara jadwal dan pipeline: konsultasi terjadi di tahap
+            // Spesifikasi, jadi prospek yang dijadwalkan bertemu ikut naik ke
+            // sana. Dulu baris ini memanggil tahap 'meeting' yang sudah dihapus
+            // sejak v8 — setiap jadwal untuk prospek baru gagal setengah jalan:
+            // barisnya tersimpan, tapi kalender Google dan email tidak pernah
+            // terkirim.
             if (!empty($data['client_id'])) {
                 $cid = (int) $data['client_id'];
-                $cl  = one("SELECT stage FROM clients WHERE id = ?", [$cid]);
-                if ($cl && $cl['stage'] === 'baru') {
-                    clientSetStage($cid, 'meeting', $user['id'], 'Pertemuan dijadwalkan.');
-                }
+                clientMajuKe($cid, 'spesifikasi', $user['id'], 'Konsultasi dijadwalkan.');
                 clientLog($cid, 'meeting', 'Pertemuan dijadwalkan: ' . $data['title'],
                     tanggalID($startAt, true) . ' WIB · ' .
                     ['meet'=>'Google Meet','zoom'=>'Zoom','onsite'=>'Tatap muka','phone'=>'Telepon'][$data['mode']],
@@ -141,8 +140,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 // Hasil pertemuan langsung menentukan langkah berikutnya.
                 if ($hasil === 'lanjut') {
-                    $r = clientSetStage((int) $m['client_id'], 'penawaran', $user['id'], $ket);
-                    $pesan .= ' Klien dipindahkan ke tahap Penawaran.';
+                    // "Lanjut" artinya penawarannya siap DISUSUN — belum dikirim.
+                    // Tahap Penawaran berarti "sudah dikirim, menunggu jawaban";
+                    // memindahkannya ke sana di titik ini membuat papan bilang
+                    // klien sedang menimbang dokumen yang belum pernah ada.
+                    $cid = (int) $m['client_id'];
+                    clientMajuKe($cid, 'spesifikasi', $user['id'], $ket);
+                    q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
+                      ['Susun dan kirim penawaran', date('Y-m-d', strtotime('+3 day')), $cid]);
+                    $pesan .= ' Tindakan berikutnya: susun dan kirim penawaran (tenggat 3 hari).';
                 } elseif ($hasil === 'batal') {
                     clientSetStage((int) $m['client_id'], 'batal', $user['id'], $ket ?: 'Tidak berlanjut setelah konsultasi.');
                     $pesan .= ' Klien dipindahkan ke arsip Tidak jadi.';

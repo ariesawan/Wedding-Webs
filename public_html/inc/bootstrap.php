@@ -47,3 +47,8 @@ require_once __DIR__ . '/seo.php';
 // nanti di galeri/blog/event — memuatnya satu per satu berarti satu halaman
 // yang terlewat langsung fatal, dan itu persis yang terjadi sebelumnya.
 require_once __DIR__ . '/i18n.php';
+
+// Kolom yang dibutuhkan kode ditambahkan sendiri kalau migrasinya belum
+// dijalankan. Setelah sekali beres, ini cuma satu perbandingan angka.
+require_once __DIR__ . '/skema.php';
+skemaPastikan();

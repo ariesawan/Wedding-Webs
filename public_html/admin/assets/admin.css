@@ -797,3 +797,153 @@ body.rail-open{overflow:hidden}
 .msg .gagal{margin-top:6px;font-size:11.5px;color:var(--rose-text);background:var(--rose-soft);
   border:1px solid var(--rose-line);border-radius:7px;padding:6px 9px;line-height:1.5}
 .msg.keluar .gagal{color:#5a1b1b;background:rgba(255,255,255,.55);border-color:rgba(120,30,30,.25)}
+
+/* ===========================================================
+   v22 — ALUR BERTAHAP
+   Halaman klien dulu satu dinding sebelas kartu. Sekarang:
+   jalur tahap → satu kartu "langkah sekarang" → tab.
+   =========================================================== */
+
+/* .hint di luar .field dulu tidak punya gaya sama sekali, jadi
+   tampil sebesar teks badan dan terlihat seperti paragraf utama. */
+.hint{font-size:12.3px;color:var(--ivory-38);line-height:1.55}
+p.hint{margin:6px 0 0}
+.card .sub b{color:var(--ivory)}
+
+/* ---------- jalur tahap ---------- */
+.jalur{padding:18px 22px}
+.stepper{list-style:none;display:flex;gap:0;margin:0;padding:0;overflow-x:auto;scrollbar-width:thin}
+.stepper li{flex:1 1 0;min-width:92px;display:flex;flex-direction:column;align-items:center;gap:7px;position:relative;text-align:center}
+.stepper li::before{content:"";position:absolute;top:13px;left:calc(-50% + 16px);right:calc(50% + 16px);height:2px;background:var(--ivory-12)}
+.stepper li:first-child::before{display:none}
+.stepper li.done::before,.stepper li.now::before{background:var(--sage)}
+.stepper .no{width:27px;height:27px;border-radius:50%;display:grid;place-items:center;font-family:var(--mono);font-size:11px;
+  border:1.5px solid var(--ivory-12);color:var(--ivory-38);background:var(--ink-2);position:relative;z-index:1}
+.stepper li.done .no{border-color:var(--sage);color:var(--sage);background:var(--sage-soft)}
+.stepper li.now .no{border-color:var(--ember);background:var(--ember);color:var(--ink);font-weight:600;box-shadow:0 0 0 4px var(--ember-soft)}
+.stepper .tx{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ivory-38);white-space:nowrap}
+.stepper li.done .tx{color:var(--sage-text)}
+.stepper li.now .tx{color:var(--ember);font-weight:600}
+.jalur-bawah{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;
+  margin-top:16px;padding-top:14px;border-top:1px solid var(--ivory-07)}
+.pindah summary{list-style:none;cursor:pointer}
+.pindah summary::-webkit-details-marker{display:none}
+.pindah[open]{flex-basis:100%}
+.pindah-form{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:12px}
+
+/* ---------- kartu langkah sekarang ---------- */
+.langkah-kini{border-color:var(--ember-line);background:linear-gradient(180deg,var(--ember-soft),transparent 70%),var(--ink-2)}
+.langkah-kini h2{margin:6px 0 6px;font-size:23px}
+.langkah-kini .sub{margin-bottom:14px}
+.aksi{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.butir{list-style:none;margin:0 0 16px;padding:0;display:grid;gap:7px}
+.butir li{display:flex;gap:10px;align-items:center;font-size:13.8px;color:var(--ivory-60)}
+.butir .tanda{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:11px;
+  border:1.5px solid var(--ivory-12);color:var(--ivory-38);flex:0 0 20px}
+.butir li.ok{color:var(--ivory)}
+.butir li.ok .tanda{border-color:var(--sage);background:var(--sage);color:var(--ink-2)}
+.butir a{color:var(--ember);text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--ember-line)}
+.tidakjadi{margin-top:16px;padding-top:12px;border-top:1px dashed var(--ivory-12)}
+.tidakjadi summary{cursor:pointer;font-size:12.5px;color:var(--ivory-38)}
+.tidakjadi summary:hover{color:var(--rose)}
+
+/* ---------- tab ---------- */
+.tabs{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;margin:18px 0 0;padding:4px;
+  background:var(--ink-2);border:var(--card-border);border-radius:12px;box-shadow:var(--shadow);scroll-margin-top:12px}
+.tabs::-webkit-scrollbar{display:none}
+.tabs a{flex:1 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 11px;border-radius:9px;
+  font-size:13px;color:var(--ivory-60);white-space:nowrap}
+.tabs a:hover{color:var(--ivory);background:var(--ivory-07)}
+.tabs a.on{background:var(--ember-soft);color:var(--ember);font-weight:600}
+.tabs .n{font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:99px;background:var(--ivory-07);color:var(--ivory-60)}
+.tabs a.on .n{background:var(--ember);color:var(--ink)}
+.tabs .titik{width:7px;height:7px;border-radius:50%;background:var(--ember)}
+.tabpane{margin-top:18px}
+.tabpane > .card:first-child{margin-top:0}
+.tabpane .card{scroll-margin-top:14px}
+body:not(.tabs-on) .tabpane{display:block}
+
+/* ---------- ringkasan samping ---------- */
+.ringkas-h{text-align:center;padding:6px 0 14px;border-bottom:1px solid var(--ivory-12);margin-bottom:8px}
+.ringkas .hitung{font-family:var(--serif);font-style:italic;font-size:36px;line-height:1;color:var(--ember)}
+.ringkas .tbl td{padding:8px 0}
+.ringkas .tbl tr:hover td{background:transparent}
+
+/* ---------- formulir data klien ---------- */
+.lab.bagian{display:block;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--ivory-07);color:var(--ember)}
+form > .lab.bagian:first-of-type{margin-top:4px;padding-top:0;border-top:0}
+.sub-lab{display:block;font-size:12.5px;color:var(--ivory-60);margin-bottom:8px;font-weight:600}
+label.inline{display:inline-flex;gap:7px;align-items:center;font-size:13.5px;margin:0 0 4px;text-transform:none;letter-spacing:0;font-family:inherit;color:var(--ivory)}
+.pilih-tipe{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid var(--ivory-12);border-radius:10px;cursor:pointer;margin:0}
+.pilih-tipe:has(input:checked){border-color:var(--ember-line);background:var(--ember-soft)}
+.pilih-tipe input{margin-top:3px;accent-color:var(--ember)}
+.pilih-tipe b{display:block;color:var(--ivory);font-size:13.8px}
+.pilih-tipe small{display:block;color:var(--ivory-38);font-size:12px;margin-top:2px}
+
+/* ---------- langkah penawaran ---------- */
+.langkah{display:grid;grid-template-columns:34px minmax(0,1fr);gap:14px;align-items:start;margin-top:14px}
+.langkah-no{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-family:var(--mono);font-size:13px;
+  border:1.5px solid var(--ivory-12);color:var(--ivory-38);background:var(--ink-2);margin-top:14px}
+.langkah-no.now{border-color:var(--ember);background:var(--ember);color:var(--ink);font-weight:600}
+.langkah-no.ok{border-color:var(--sage);color:var(--sage)}
+.pilih3{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.pilih{border:1px solid var(--ivory-12);border-radius:12px;padding:14px 15px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.pilih > b{font-size:14.5px;color:var(--ivory)}
+.pilih > span{font-size:12.5px;color:var(--ivory-38);line-height:1.5;margin-bottom:6px}
+.pilih details{width:100%}
+.pilih details summary{list-style:none}
+.pilih details summary::-webkit-details-marker{display:none}
+@media(max-width:600px){
+  .langkah{grid-template-columns:1fr}
+  .langkah-no{display:none}
+}
+.jalur + .g-side{margin-top:18px}
+.dua{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 18px;align-items:start}
+@media(max-width:700px){ .dua{grid-template-columns:1fr} }
+.rail nav .grup{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--ivory-38);padding:16px 22px 5px;opacity:.85}
+.rail nav{margin-top:18px}
+.rail nav a{padding-top:8px;padding-bottom:8px}
+
+/* ---------- ringkasan (dashboard) ---------- */
+.stat-baris{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.stat-baris .stat{display:block;transition:border-color .16s,transform .16s}
+.stat-baris a.stat:hover{border-color:var(--ember-line);transform:translateY(-1px)}
+@media(max-width:1000px){ .stat-baris{grid-template-columns:repeat(2,minmax(0,1fr))} }
+.corong-kartu{margin-top:18px}
+.corong{display:flex;gap:6px;margin-top:14px;overflow-x:auto;scrollbar-width:thin}
+.corong a{flex:1 1 0;min-width:96px;padding:12px 12px 11px;border-radius:10px;background:var(--ink-3);
+  display:flex;flex-direction:column;gap:3px;border:1px solid transparent;transition:.16s}
+.corong a:hover{border-color:var(--ember-line)}
+.corong a b{font-family:var(--serif);font-style:italic;font-weight:400;font-size:24px;line-height:1;color:var(--ivory-38)}
+.corong a.isi b{color:var(--ember)}
+.corong a span{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ivory-60);white-space:nowrap}
+.grid.dash{grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);align-items:start;margin-top:18px}
+.grid.dash > .card{height:auto}
+.dash-samping{display:grid;gap:18px}
+.dash-samping .card{margin:0}
+@media(max-width:1000px){ .grid.dash{grid-template-columns:1fr} }
+.hari-ini .lab{display:block;margin-top:18px}
+.hari-ini h2 + .lab{margin-top:10px}
+.daftar{list-style:none;margin:8px 0 0;padding:0}
+.daftar li{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--ivory-07)}
+.daftar li:last-child{border-bottom:0}
+.daftar li > a{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.daftar li > a b{font-size:14px;color:var(--ivory);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.daftar li > a span{font-size:12.5px;color:var(--ivory-60);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.daftar li > a:hover b{color:var(--ember)}
+.daftar .kapan{font-family:var(--mono);font-size:11px;color:var(--ivory-60);white-space:nowrap}
+.daftar .kapan.telat{color:var(--rose)}
+.daftar .pill{flex:0 0 auto}
+@media(max-width:560px){ .daftar .pill{display:none} }
+.perhatian summary{cursor:pointer;list-style:none}
+.perhatian summary::-webkit-details-marker{display:none}
+
+/* ---------- papan pipeline: satu baris, geser ke samping ---------- */
+.board.pipa{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:0;scroll-snap-type:x proximity;scrollbar-width:thin}
+.board.pipa .col{flex:0 0 212px;scroll-snap-align:start;background:var(--ink-3);border-color:transparent}
+.board.pipa .col.hot{border-color:var(--ember-line)}
+.kalender > summary{cursor:pointer;list-style:none}
+.kalender > summary::-webkit-details-marker{display:none}
+.kalender[open] > summary .hint{display:none!important}
+.board.pipa .lead{background:var(--ink-2)}

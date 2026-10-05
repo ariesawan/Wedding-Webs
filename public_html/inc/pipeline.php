@@ -11,7 +11,17 @@
  * mencegah prospek hilang begitu saja.
  *
  * Alur normal:
- *   baru → meeting → penawaran → negosiasi → deal → persiapan → hari-H → selesai
+ *   baru → price list → spesifikasi → penawaran → deal → persiapan → hari-H → selesai
+ *
+ *   baru         price list dikirim            → pricelist   (otomatis saat ditandai terkirim)
+ *   pricelist    klien cocok dengan price list → spesifikasi (tombol "Klien cocok")
+ *                konsultasi dijadwalkan        → spesifikasi (otomatis dari Jadwal)
+ *   spesifikasi  penawaran dikirim             → penawaran   (otomatis saat ditandai terkirim)
+ *   penawaran    klien setuju                  → deal        (termin + event + serah ke office)
+ *   deal         mulai persiapan               → persiapan   (checklist dibuat)
+ *   persiapan    H-7                           → hari-H      (cron)
+ *   hari-H       acara lewat                   → selesai     (cron)
+ *
  * Alur gagal:
  *   dari tahap mana pun → batal (wajib isi alasan, supaya bisa dievaluasi)
  */
@@ -87,6 +97,56 @@ function stageLabel(string $s): string { return PIPE_STAGES[$s]['label'] ?? $s; 
 function stageNext(string $s): string  { return PIPE_STAGES[$s]['next']  ?? ''; }
 function stageSla(string $s): int      { return PIPE_STAGES[$s]['sla']   ?? 3; }
 
+/** Posisi tahap di jalur normal. Selesai paling ujung, batal di luar jalur. */
+function stageUrut(string $s): int
+{
+    if ($s === 'selesai') return count(PIPE_ACTIVE);
+    $i = array_search($s, PIPE_ACTIVE, true);
+    return $i === false ? -1 : $i;
+}
+
+/** Tahap yang sudah melewati deal — dipegang admin office. */
+function stageSudahDeal(string $s): bool
+{
+    return in_array($s, ['deal', 'persiapan', 'harih', 'selesai'], true);
+}
+
+/**
+ * Titik gugur untuk menu Analisa. Nilainya harus salah satu momen di
+ * client_analisa: pricelist, penawaran, deal, pascaacara.
+ *
+ * Sebelumnya apa pun selain 'pricelist' dianggap 'penawaran' — prospek yang
+ * mundur sebelum menerima apa-apa ikut tercatat "gugur setelah penawaran",
+ * dan laporan analisa jadi menyalahkan harga untuk klien yang belum pernah
+ * melihat harga.
+ */
+function momenGugur(string $stage): string
+{
+    return match ($stage) {
+        'baru', 'pricelist'              => 'pricelist',
+        'spesifikasi', 'penawaran'       => 'penawaran',
+        'deal', 'persiapan', 'harih'     => 'deal',
+        'selesai'                        => 'pascaacara',
+        default                          => 'penawaran',
+    };
+}
+
+/**
+ * Majukan tahap HANYA kalau tujuannya ada di depan tahap sekarang.
+ *
+ * Dipakai oleh perpindahan otomatis (penawaran terkirim, pertemuan
+ * dijadwalkan). Tanpa penjagaan ini, mengirim price list ke klien yang
+ * sudah deal — misalnya untuk tambahan paket — menarik kliennya mundur ke
+ * tahap Price list dan melepasnya dari admin office.
+ */
+function clientMajuKe(int $id, string $stage, ?int $userId = null, string $note = ''): array
+{
+    $c = one("SELECT stage FROM clients WHERE id = ?", [$id]);
+    if (!$c || in_array($c['stage'], ['batal', 'selesai'], true)) return ['changed' => false, 'info' => []];
+    if (stageUrut($stage) <= stageUrut($c['stage'])) return ['changed' => false, 'info' => []];
+    return clientSetStage($id, $stage, $userId, $note);
+}
+
 /**
  * Checklist bawaan, dihitung mundur dari tanggal pernikahan.
  * Angka negatif = berapa hari sebelum hari-H.
@@ -131,6 +191,104 @@ function paymentTemplate(float $deal, ?string $weddingDate, int $dpPercent = 30)
     ];
 }
 
+/**
+ * Termin untuk satu nilai kontrak, dari tabel payment_templates.
+ *
+ * Inilah termin yang SAMA dengan yang tercantum di teks penawaran yang
+ * dikirim ke klien (quoteTeksWA membaca tabel yang sama). Dulu deal memakai
+ * paymentTemplate() di atas — DP 30% + dua termin H-60/H-14 yang ditulis
+ * mati di kode — sementara penawaran menjanjikan Dealing 30% / H-60 20% /
+ * H-30 30% / H-7 20%. Klien menerima satu jadwal, panel menagih jadwal lain.
+ *
+ * paymentTemplate() tetap dipakai sebagai cadangan kalau tabelnya kosong.
+ */
+function terminKlien(float $total, ?string $weddingDate): array
+{
+    $tpl = [];
+    try { $tpl = all("SELECT * FROM payment_templates WHERE is_active = 1 ORDER BY urutan, id"); }
+    catch (Throwable $e) { $tpl = []; }
+
+    // Termin "saat tanda tangan" ditagih tiga hari lagi. Termin lain tidak
+    // boleh jatuh tempo sebelum itu: kalau acaranya tinggal sebulan, termin
+    // H-60 langsung tercatat "terlambat" begitu deal, padahal klien baru
+    // saja setuju.
+    $paling_awal = date('Y-m-d', strtotime('+3 day'));
+
+    if (!$tpl) {
+        $out = [];
+        foreach (paymentTemplate($total, $weddingDate, (int) setting('dp_percent', '30')) as $t) {
+            $out[] = $t + ['kode' => '', 'persen' => null, 'wajib' => 0];
+        }
+        return $out;
+    }
+
+    $jumlahPersen = array_sum(array_map(fn($t) => (float) $t['persen'], $tpl));
+    $genap = abs($jumlahPersen - 100) < 0.01;
+    $out = []; $terpakai = 0.0; $n = count($tpl);
+
+    foreach ($tpl as $i => $t) {
+        $amount = round($total * (float) $t['persen'] / 100);
+        // Pembulatan per baris bisa membuat jumlahnya meleset beberapa rupiah
+        // dari nilai kontrak. Baris terakhir menampung selisihnya — asal
+        // persentasenya memang genap 100.
+        if ($genap && $i === $n - 1) $amount = $total - $terpakai;
+        $terpakai += $amount;
+
+        if ($t['offset_hari'] === null) {
+            $due = $paling_awal;
+        } elseif ($weddingDate) {
+            $due = date('Y-m-d', strtotime($weddingDate . ' -' . (int) $t['offset_hari'] . ' day'));
+            if ($due < $paling_awal) $due = $paling_awal;
+        } else {
+            $due = null;
+        }
+
+        $out[] = [
+            'kode'       => (string) $t['kode'],
+            'label'      => $t['label'],
+            'persen'     => (float) $t['persen'],
+            'amount'     => $amount,
+            'due_date'   => $due,
+            'wajib'      => (int) $t['wajib'],
+            'sort_order' => ($i + 1) * 10,
+        ];
+    }
+    return $out;
+}
+
+/** Susun termin klien dari template. Hanya kalau belum ada satu pun. */
+function terminSusun(int $clientId): int
+{
+    $c = one("SELECT deal_value, wedding_date FROM clients WHERE id = ?", [$clientId]);
+    if (!$c || (float) $c['deal_value'] <= 0) return 0;
+    if ((int) (one("SELECT COUNT(*) n FROM payments WHERE client_id = ?", [$clientId])['n'] ?? 0)) return 0;
+
+    $n = 0;
+    foreach (terminKlien((float) $c['deal_value'], $c['wedding_date']) as $t) {
+        q("INSERT INTO payments (client_id, kode, label, amount, due_date, sort_order, persen, wajib)
+           VALUES (?,?,?,?,?,?,?,?)",
+          [$clientId, $t['kode'], $t['label'], $t['amount'], $t['due_date'],
+           $t['sort_order'], $t['persen'], $t['wajib']]);
+        $n++;
+    }
+    return $n;
+}
+
+/** Susun checklist persiapan. Hanya kalau belum ada satu pun. */
+function checklistSusun(int $clientId): int
+{
+    if ((int) (one("SELECT COUNT(*) n FROM client_tasks WHERE client_id = ?", [$clientId])['n'] ?? 0)) return 0;
+    $tgl = one("SELECT wedding_date FROM clients WHERE id = ?", [$clientId])['wedding_date'] ?? null;
+    $n = 0;
+    foreach (TASK_TEMPLATE as $i => [$off, $judul, $detail]) {
+        $due = $tgl ? date('Y-m-d', strtotime($tgl . " $off day")) : null;
+        q("INSERT INTO client_tasks (client_id, title, detail, offset_day, due_date, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?)", [$clientId, $judul, $detail, $off, $due, $i * 10]);
+        $n++;
+    }
+    return $n;
+}
+
 /** Catat aktivitas ke garis waktu klien. */
 function clientLog(int $clientId, string $type, string $title, string $detail = '', ?int $userId = null): void
 {
@@ -142,16 +300,26 @@ function clientLog(int $clientId, string $type, string $title, string $detail = 
  * Pindahkan klien ke tahap lain, sekaligus jalankan efek sampingnya.
  *
  * Efek yang otomatis terjadi:
- *   → deal      : buat event di kalender situs + susun termin pembayaran
- *   → persiapan : susun checklist H-90 sampai H+3
- *   → batal     : catat alasan dan tanggal
+ *   → spesifikasi : catat kapan price list disetujui
+ *   → deal        : nilai deal diambil dari penawaran yang disetujui (kalau
+ *                   belum diisi), event dibuat, termin disusun dari template
+ *                   pembayaran, klien pindah ke admin office
+ *   → persiapan / hari-H : checklist H-90 sampai H+3 (kalau belum ada)
+ *   → batal       : alasan WAJIB, titik gugur dicatat untuk Analisa
+ *   ← mundur ke sebelum deal : pegangan kembali ke admin early
  */
 function clientSetStage(int $id, string $stage, ?int $userId = null, string $note = ''): array
 {
     if (!isset(PIPE_STAGES[$stage])) throw new InvalidArgumentException('Tahap tidak dikenal.');
     $c = one("SELECT * FROM clients WHERE id = ?", [$id]);
     if (!$c) throw new RuntimeException('Klien tidak ditemukan.');
-    if ($c['stage'] === $stage && $stage !== 'batal') return ['changed' => false, 'info' => []];
+    if ($c['stage'] === $stage) return ['changed' => false, 'info' => []];
+
+    // Tanpa alasan, menu Analisa tidak punya bahan. Antarmuka sudah memintanya
+    // tapi tidak pernah memaksanya — dan yang tidak dipaksa selalu dilewati.
+    if ($stage === 'batal' && trim($note) === '') {
+        throw new RuntimeException('Alasan wajib diisi saat menandai klien tidak jadi.');
+    }
 
     $info = [];
     $lama = stageLabel($c['stage']);
@@ -167,7 +335,37 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
         q("UPDATE clients SET next_action = '', next_action_at = NULL WHERE id = ?", [$id]);
     }
 
+    // Diaktifkan lagi dari arsip "tidak jadi".
+    if ($c['stage'] === 'batal') {
+        q("UPDATE clients SET lost_at = NULL, lost_reason = '', stage_batal = '' WHERE id = ?", [$id]);
+    }
+
+    // Mundur ke tahap sebelum deal (koreksi salah klik, atau deal batal di
+    // tengah jalan): pegangan kembali ke admin early. Kalau tidak, klien
+    // muncul di papan admin office padahal belum ada kontrak.
+    if ($stage !== 'batal' && !stageSudahDeal($stage) && ($c['pic_role'] ?? '') === 'admin_office') {
+        q("UPDATE clients SET pic_role = 'admin_biasa' WHERE id = ?", [$id]);
+        $info[] = 'Pegangan kembali ke admin early.';
+    }
+
+    if ($stage === 'spesifikasi') {
+        q("UPDATE clients SET spesifikasi_at = COALESCE(spesifikasi_at, NOW()) WHERE id = ?", [$id]);
+    }
+
     if ($stage === 'deal') {
+        // Nilai deal = total penawaran yang disetujui. Dulu kolom ini harus
+        // diketik ulang manual di Data klien; kalau lupa, termin tidak pernah
+        // tersusun dan tidak ada yang memberi tahu.
+        $nilai = (float) ($c['deal_value'] ?? 0);
+        if ($nilai <= 0) {
+            $qc = one("SELECT total FROM quotes WHERE client_id = ? AND status = 'cocok' AND jenis = 'penawaran'
+                       ORDER BY decided_at DESC, id DESC LIMIT 1", [$id]);
+            if ($qc && (float) $qc['total'] > 0) {
+                $nilai = (float) $qc['total'];
+                q("UPDATE clients SET deal_value = ? WHERE id = ?", [$nilai, $id]);
+            }
+        }
+
         if (!$c['event_id'] && $c['wedding_date']) {
             $judul = trim(($c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : '')));
             $slug  = uniqueSlug('events', slugify($judul . '-' . date('Y', strtotime($c['wedding_date']))));
@@ -179,47 +377,36 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
             q("UPDATE clients SET event_id = ? WHERE id = ?", [$eid, $id]);
             $info[] = 'Event dibuat di menu Event (masih tersembunyi — terbitkan bila ingin tampil di beranda).';
         }
-        $sudahAda = (int) (one("SELECT COUNT(*) c FROM payments WHERE client_id = ?", [$id])['c'] ?? 0);
-        if (!$sudahAda && $c['deal_value'] > 0) {
-            $dpP = (int) setting('dp_percent', '30');
-            foreach (paymentTemplate((float) $c['deal_value'], $c['wedding_date'], $dpP) as $t) {
-                q("INSERT INTO payments (client_id, label, amount, due_date, sort_order) VALUES (?, ?, ?, ?, ?)",
-                  [$id, $t['label'], $t['amount'], $t['due_date'], $t['sort_order']]);
-            }
-            $info[] = 'Termin pembayaran disusun otomatis (DP ' . $dpP . '% + 2 termin).';
+
+        if ($nilai > 0) {
+            $n = terminSusun($id);
+            if ($n) $info[] = "Termin pembayaran disusun dari template ($n termin).";
+        } else {
+            $info[] = 'Nilai deal belum ada, jadi termin belum disusun. Isi nilai deal di Data klien, '
+                    . 'lalu tekan "Susun termin" di kartu Pembayaran.';
         }
-    }
 
-    if ($stage === 'persiapan') {
-        $sudahAda = (int) (one("SELECT COUNT(*) c FROM client_tasks WHERE client_id = ?", [$id])['c'] ?? 0);
-        if (!$sudahAda) {
-            $n = 0;
-            foreach (TASK_TEMPLATE as $i => [$off, $judul, $detail]) {
-                $due = $c['wedding_date'] ? date('Y-m-d', strtotime($c['wedding_date'] . " $off day")) : null;
-                q("INSERT INTO client_tasks (client_id, title, detail, offset_day, due_date, sort_order)
-                   VALUES (?, ?, ?, ?, ?, ?)", [$id, $judul, $detail, $off, $due, $i * 10]);
-                $n++;
-            }
-            $info[] = "Checklist persiapan dibuat ($n langkah, dihitung mundur dari hari-H).";
-        }
-    }
-
-    if ($stage === 'batal') {
-        q("UPDATE clients SET lost_at = NOW(), lost_reason = ? WHERE id = ?", [mb_substr($note, 0, 255), $id]);
-        // Alasan bebas yang diketik di sini berguna untuk dibaca, tapi tidak
-        // bisa dihitung. Analisa terstruktur diminta terpisah — dan diminta
-        // SEKARANG, karena ingatan soal kenapa klien mundur luruh cepat.
-        q("UPDATE clients SET stage_batal = ? WHERE id = ? AND stage_batal = ''",
-          [in_array($c['stage'], ['pricelist','penawaran'], true) ? $c['stage'] : 'penawaran', $id]);
-        $info[] = 'Catat sebabnya di menu Analisa selagi masih segar → analisa.php?klien=' . $id;
-    }
-
-    if ($stage === 'deal') {
         q("UPDATE clients SET contract_signed_at = COALESCE(contract_signed_at, NOW()),
                               pic_role = 'admin_office',
                               handover_at = COALESCE(handover_at, NOW())
            WHERE id = ?", [$id]);
-        $info[] = 'Peran berpindah ke admin office. Catat juga kenapa klien ini jadi, di menu Analisa.';
+        $info[] = 'Klien diserahkan ke admin office. Catat juga kenapa klien ini jadi, di menu Analisa.';
+    }
+
+    // Checklist dibuat saat masuk persiapan — atau saat langsung loncat ke
+    // hari-H (cron H-7 memindahkan klien deal yang belum sempat dipersiapkan).
+    if ($stage === 'persiapan' || $stage === 'harih') {
+        $n = checklistSusun($id);
+        if ($n) $info[] = "Checklist persiapan dibuat ($n langkah, dihitung mundur dari hari-H).";
+    }
+
+    if ($stage === 'batal') {
+        q("UPDATE clients SET lost_at = NOW(), lost_reason = ?, stage_batal = ? WHERE id = ?",
+          [mb_substr($note, 0, 255), momenGugur($c['stage']), $id]);
+        // Alasan bebas yang diketik di sini berguna untuk dibaca, tapi tidak
+        // bisa dihitung. Analisa terstruktur diminta terpisah — dan diminta
+        // SEKARANG, karena ingatan soal kenapa klien mundur luruh cepat.
+        $info[] = 'Catat sebabnya di menu Analisa selagi masih segar.';
     }
 
     clientLog($id, 'tahap', "Tahap: $lama → " . stageLabel($stage), $note, $userId);
@@ -272,7 +459,9 @@ function pipelineAutoAdvance(): array
 {
     $out = [];
 
-    foreach (all("SELECT id, name FROM clients WHERE stage = 'persiapan'
+    // 'deal' ikut dihitung: klien yang deal mepet tanggal sering tidak sempat
+    // dimajukan manual ke persiapan, lalu tertahan di deal sampai acaranya lewat.
+    foreach (all("SELECT id, name FROM clients WHERE stage IN ('deal','persiapan')
                   AND wedding_date IS NOT NULL AND wedding_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)") as $c) {
         clientSetStage((int) $c['id'], 'harih');
         $out[] = $c['name'] . ' → Hari-H';
