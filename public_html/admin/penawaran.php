@@ -152,7 +152,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new RuntimeException('WhatsApp gagal: ' . ($r['error'] ?? 'tidak diketahui')
                         . '. Belum ditandai terkirim — kirim manual lalu tekan "Sudah saya kirim".');
                 }
-                flash($jenisLbl . ' terkirim lewat WhatsApp beserta PDF-nya.' . tahapInfo($cid));
+                flash(empty($r['lampiran_gagal'])
+                    ? $jenisLbl . ' terkirim lewat WhatsApp beserta PDF-nya.' . tahapInfo($cid)
+                    : $jenisLbl . ' terkirim lewat WhatsApp, tapi PDF gagal dilampirkan (' . $r['lampiran_gagal']
+                      . '). Tautan PDF sudah ada di teksnya; bila perlu unduh dan kirim manual.' . tahapInfo($cid),
+                      empty($r['lampiran_gagal']) ? 'ok' : 'warn');
             } else {
                 quoteTandaiTerkirim($qid, (int) $user['id']);
                 clientLog($cid, 'sistem', $jenisLbl . ' ' . $qq['nomor'] . ' dikirim manual',

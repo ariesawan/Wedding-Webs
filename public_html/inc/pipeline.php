@@ -471,15 +471,7 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
 
     if ($stage === 'deal') {
 
-        if (!$c['event_id'] && $c['wedding_date']) {
-            $judul = trim(($c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : '')));
-            $slug  = uniqueSlug('events', slugify($judul . '-' . date('Y', strtotime($c['wedding_date']))));
-            $waktu = $c['wedding_date'] . ' ' . ($c['wedding_time'] ?: '08:00:00');
-            q("INSERT INTO events (title, slug, couple, event_date, venue, city, guest_count, is_published)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-              ['Pernikahan ' . $judul, $slug, $judul, $waktu, $c['venue'], $c['city'], $c['guest_estimate']]);
-            $eid = insertId();
-            q("UPDATE clients SET event_id = ? WHERE id = ?", [$eid, $id]);
+        if (eventPastikan($id)) {
             $info[] = 'Event dibuat di menu Event (masih tersembunyi — terbitkan bila ingin tampil di beranda).';
         }
 
@@ -516,6 +508,48 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
 
     clientLog($id, 'tahap', "Tahap: $lama → " . stageLabel($stage), $note, $userId);
     return ['changed' => true, 'info' => $info];
+}
+
+/**
+ * Buat event untuk klien yang sudah deal, kalau belum ada dan tanggalnya
+ * sudah diketahui. Dipanggil saat deal, dan lagi saat admin office mengisi
+ * tanggal belakangan (prospek sering belum pasti tanggal ketika DP).
+ */
+function eventPastikan(int $clientId): bool
+{
+    $c = one("SELECT * FROM clients WHERE id = ?", [$clientId]);
+    if (!$c || $c['event_id'] || !$c['wedding_date'] || !stageSudahDeal($c['stage'])) return false;
+    $judul = trim(($c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : '')));
+    $slug  = uniqueSlug('events', slugify($judul . '-' . date('Y', strtotime($c['wedding_date']))));
+    $waktu = $c['wedding_date'] . ' ' . ($c['wedding_time'] ?: '08:00:00');
+    q("INSERT INTO events (title, slug, couple, event_date, venue, city, guest_count, is_published)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+      ['Pernikahan ' . $judul, $slug, $judul, $waktu, $c['venue'], $c['city'], $c['guest_estimate']]);
+    q("UPDATE clients SET event_id = ? WHERE id = ?", [insertId(), $clientId]);
+    return true;
+}
+
+/**
+ * Tanggal pernikahan bergeser → jatuh tempo termin yang belum dibayar ikut
+ * digeser, dengan aturan yang sama seperti saat termin disusun (hari-H
+ * dikurangi offset template, paling cepat 3 hari lagi). Termin DP dan termin
+ * yang diketik manual (tanpa offset) tidak disentuh.
+ */
+function terminGeser(int $clientId, string $weddingDate): int
+{
+    try {
+        $rows = all("SELECT p.id, t.offset_hari FROM payments p
+                       JOIN payment_templates t ON t.kode = p.kode AND p.kode <> ''
+                      WHERE p.client_id = ? AND p.paid_at IS NULL AND t.offset_hari IS NOT NULL", [$clientId]);
+    } catch (Throwable $e) {
+        return 0;
+    }
+    $paling_awal = date('Y-m-d', strtotime('+3 day'));
+    foreach ($rows as $r) {
+        $due = date('Y-m-d', strtotime($weddingDate . ' -' . (int) $r['offset_hari'] . ' day'));
+        q("UPDATE payments SET due_date = ? WHERE id = ?", [max($due, $paling_awal), $r['id']]);
+    }
+    return count($rows);
 }
 
 /** Perbarui tanggal jatuh tempo checklist bila tanggal pernikahan bergeser. */

@@ -6,6 +6,9 @@
  *
  * Variabel yang diharapkan: $seo (array untuk seoHead), $crumbs (array [nama, url]).
  */
+// Bahasa ditentukan SEBELUM ada keluaran: ?lang= memasang cookie, dan cookie
+// hanya bisa dikirim sebelum HTML pertama.
+if (function_exists('bahasaAktif')) bahasaAktif();
 ?><!DOCTYPE html>
 <html lang="id">
 <head>

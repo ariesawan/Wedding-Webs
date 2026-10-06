@@ -72,11 +72,14 @@ function formIsi(array $src): array
         'wa'      => mb_substr(trim((string) ($src['wa'] ?? '')), 0, 30),
         'email'   => mb_substr(trim((string) ($src['email'] ?? '')), 0, 160),
         'ig'      => mb_substr(ltrim(trim((string) ($src['ig'] ?? '')), '@'), 0, 79),
-        'tanggal' => trim((string) ($src['tanggal'] ?? '')),
+        'tanggal' => mb_substr(trim((string) ($src['tanggal'] ?? '')), 0, 10),
         'kota'    => mb_substr(trim((string) ($src['kota'] ?? '')), 0, 90),
         'venue'   => mb_substr(trim((string) ($src['venue'] ?? '')), 0, 190),
         'tamu'    => (int) preg_replace('/\D/', '', (string) ($src['tamu'] ?? '0')),
-        'budget'  => (int) preg_replace('/\D/', '', (string) ($src['budget'] ?? '0')),
+        // Angka pertama saja: "50-70 juta" atau "Rp 50.000.000 - 70.000.000"
+        // tidak boleh digabung jadi satu angka raksasa yang ditolak database.
+        'budget'  => preg_match('/\d[\d.,]*/', (string) ($src['budget'] ?? ''), $mb)
+                     ? (int) preg_replace('/\D/', '', preg_replace('/[.,]\d{1,2}$/', '', $mb[0])) : 0,
         'paket'   => mb_substr(trim((string) ($src['paket'] ?? '')), 0, 80),
         'sumber'  => trim((string) ($src['sumber'] ?? '')),
         'catatan' => mb_substr(trim((string) ($src['catatan'] ?? '')), 0, 2000),
@@ -84,6 +87,12 @@ function formIsi(array $src): array
     ];
     if (!isset(FORM_SUMBER[$isi['sumber']])) $isi['sumber'] = 'web';
     if ($isi['tamu'] > 30000) $isi['tamu'] = 30000;
+    // "50 juta", "75jt" — orang lebih sering menulis begini daripada nol lengkap.
+    if ($isi['budget'] > 0 && $isi['budget'] < 100000
+        && preg_match('/\b(jt|juta)\b|\djt/i', (string) ($src['budget'] ?? ''))) {
+        $isi['budget'] *= 1000000;
+    }
+    if ($isi['budget'] > 999999999999) $isi['budget'] = 0;   // batas DECIMAL(14,2)
     return $isi;
 }
 
@@ -104,6 +113,19 @@ function formValidasi(array $isi): array
     return $g;
 }
 
+/** Ringkasan satu baris isian, untuk catatan klien. */
+function formRingkas(array $isi): string
+{
+    return implode(' · ', array_filter([
+        trim($isi['pria'] . ' & ' . $isi['wanita'], ' &'),
+        $isi['tanggal'] !== '' ? 'tanggal ' . $isi['tanggal'] : '',
+        $isi['tamu'] > 0 ? '±' . $isi['tamu'] . ' tamu' : '',
+        $isi['venue'], $isi['kota'],
+        $isi['budget'] > 0 ? 'budget ' . rupiah((float) $isi['budget']) : '',
+        $isi['paket'] !== '' ? 'paket ' . $isi['paket'] : '',
+    ]));
+}
+
 /** Paket (baris quote_templates) dari slug/id isian; null bila "belum tahu". */
 function formPaket(string $kunci): ?array
 {
@@ -122,6 +144,13 @@ function formPaket(string $kunci): ?array
 function formLog(string $status, array $isi, string $ip, string $pesan = '', ?int $clientId = null): int
 {
     try {
+        // Kiriman yang ditolak/bot dari satu IP dibatasi 20 baris per jam —
+        // supaya log ini tidak bisa dibanjiri. Kiriman yang lolos selalu dicatat.
+        if (in_array($status, ['ditolak', 'bot'], true)) {
+            $n = (int) (one("SELECT COUNT(*) n FROM form_masuk WHERE ip = ? AND status IN ('ditolak','bot')
+                              AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)", [mb_substr($ip, 0, 45)])['n'] ?? 0);
+            if ($n >= 20) { error_log("form_masuk: $status dari $ip tidak dicatat (batas per jam)"); return 0; }
+        }
         $nama  = trim($isi['pria'] . ($isi['pria'] !== '' && $isi['wanita'] !== '' ? ' & ' : '') . $isi['wanita']);
         $paket = formPaket($isi['paket'])['nama'] ?? $isi['paket'];
         q("INSERT INTO form_masuk (ip, status, client_id, nama, wa, paket, pesan, payload)
@@ -146,13 +175,19 @@ function formLogSet(int $logId, string $status, ?int $clientId, string $pesan): 
     } catch (Throwable $e) { error_log('form_masuk: ' . $e->getMessage()); }
 }
 
-/** Klien yang nomornya sama (9 digit terakhir). Yang masih aktif didahulukan. */
+/**
+ * Klien yang nomornya sama (9 digit terakhir). Yang masih aktif didahulukan.
+ * Klien yang acaranya sudah selesai tidak dicocokkan: kiriman baru dari nomor
+ * itu (klien lama yang kembali, atau adik yang memakai nomor sama) adalah
+ * prospek baru, bukan alasan menimpa catatan acara yang sudah lewat.
+ */
 function formCariKlien(string $wa): ?array
 {
     $ekor = substr(formWaNormal($wa), -9);
     if (strlen($ekor) < 9) return null;
     return one("SELECT id, stage, name, partner_name FROM clients
-                WHERE phone <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 9) = ?
+                WHERE phone <> '' AND stage <> 'selesai'
+                  AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 9) = ?
                 ORDER BY (stage = 'batal'), id DESC LIMIT 1", [$ekor]) ?: null;
 }
 
@@ -179,7 +214,16 @@ function formSimpan(array $isi, string $ip, ?int $userId = null): array
     try {
         $ada  = formCariKlien($wa);
         $info = '';
-        if ($ada) {
+        if ($ada && stageSudahDeal($ada['stage'])) {
+            // Klien yang sudah DP: datanya dipegang admin office. Kiriman
+            // formulir hanya ditempel sebagai catatan, tidak menimpa tanggal,
+            // venue, atau paket yang sudah disepakati.
+            $id = (int) $ada['id'];
+            q("UPDATE clients SET notes = TRIM(CONCAT(COALESCE(notes,''), '\n\n[kiriman formulir ', DATE_FORMAT(NOW(), '%d/%m/%Y'), ']\n', ?)),
+                 updated_at = NOW() WHERE id = ?", [trim(formRingkas($isi) . "\n" . $catatan), $id]);
+            $info = 'Klien sudah DP — kiriman ditempel di catatan, data tidak ditimpa.';
+            clientLog($id, 'catatan', 'Mengirim formulir lagi', $info, $userId);
+        } elseif ($ada) {
             $id = (int) $ada['id'];
             // Nilai baru menang kalau diisi, nilai lama bertahan kalau kosong.
             // Kiriman ulang biasanya diisi seadanya — jangan sampai menghapus
@@ -293,15 +337,41 @@ function formCatatKirim(string $ip): void
     try {
         q("INSERT INTO form_throttle (ip, jumlah) VALUES (?, 1)
            ON DUPLICATE KEY UPDATE
-             jumlah = IF(terakhir < DATE_SUB(NOW(), INTERVAL 1 HOUR), 1, jumlah + 1)", [$ip]);
+             jumlah = IF(terakhir < DATE_SUB(NOW(), INTERVAL 1 HOUR), 1, jumlah + 1),
+             -- Ditulis eksplisit: kalau jumlah direset 1 → 1, nilainya tidak
+             -- berubah dan ON UPDATE CURRENT_TIMESTAMP tidak ikut jalan.
+             terakhir = NOW()", [$ip]);
     } catch (Throwable $e) { /* pencatatan gagal bukan alasan menolak */ }
 }
 
-/** Kiriman yang belum jadi klien dan belum ditangani — untuk lencana & dashboard. */
+/**
+ * Kolom untuk daftar. Isi kiriman (payload) ikut hanya kalau ukurannya wajar —
+ * daftar ini dimuat di banyak halaman panel, jadi satu baris raksasa tidak
+ * boleh bisa menjatuhkan semuanya.
+ */
+const FORM_KOLOM_DAFTAR = "f.id, f.created_at, f.ip, f.status, f.client_id, f.nama, f.wa, f.paket, f.pesan, f.ditangani,
+                           IF(CHAR_LENGTH(f.payload) > 20000, NULL, f.payload) AS payload";
+
+/** Jumlah kiriman yang perlu dicek — untuk lencana menu. */
+function formPerluCekJumlah(int $hari = 30): int
+{
+    try {
+        return (int) (one("SELECT COUNT(*) n FROM form_masuk f
+                    WHERE f.status IN ('galat','ditolak') AND f.client_id IS NULL
+                      AND f.ditangani = 0 AND CHAR_LENGTH(f.wa) >= 10
+                      AND f.created_at > DATE_SUB(NOW(), INTERVAL ? DAY)
+                      AND NOT EXISTS (SELECT 1 FROM form_masuk g
+                                      WHERE g.wa = f.wa AND g.client_id IS NOT NULL AND g.id > f.id)", [$hari])['n'] ?? 0);
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+/** Kiriman yang belum jadi klien dan belum ditangani — untuk dashboard. */
 function formPerluCek(int $hari = 30): array
 {
     try {
-        return all("SELECT f.* FROM form_masuk f
+        return all("SELECT " . FORM_KOLOM_DAFTAR . " FROM form_masuk f
                     WHERE f.status IN ('galat','ditolak') AND f.client_id IS NULL
                       AND f.ditangani = 0 AND CHAR_LENGTH(f.wa) >= 10
                       AND f.created_at > DATE_SUB(NOW(), INTERVAL ? DAY)

@@ -360,7 +360,8 @@ function chatKirim(int $chatId, string $teks, ?int $userId = null, array $opt = 
           [mb_substr((string) $r['error'], 0, 400), $mid]);
     }
 
-    return ['ok' => $r['ok'], 'id' => $mid, 'terkirim' => $r['ok'], 'error' => $r['error']];
+    return ['ok' => $r['ok'], 'id' => $mid, 'terkirim' => $r['ok'], 'error' => $r['error'],
+            'lampiran_gagal' => $r['lampiran_gagal'] ?? null];
 }
 
 /**

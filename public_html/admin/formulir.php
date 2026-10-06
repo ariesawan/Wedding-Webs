@@ -64,11 +64,11 @@ $ringkas = one("SELECT
 $baris = match ($filter) {
     // client_lanjut: kiriman yang ditolak lalu dikirim ulang dengan benar —
     // orangnya sudah jadi klien, tombol "Jadikan klien" tidak perlu lagi.
-    'semua' => all("SELECT f.*, (SELECT g.client_id FROM form_masuk g
+    'semua' => all("SELECT " . FORM_KOLOM_DAFTAR . ", (SELECT g.client_id FROM form_masuk g
                                  WHERE g.wa = f.wa AND g.client_id IS NOT NULL AND g.id > f.id
                                  ORDER BY g.id LIMIT 1) AS client_lanjut
                     FROM form_masuk f WHERE f.status <> 'bot' ORDER BY f.id DESC LIMIT 200"),
-    'bot'   => all("SELECT * FROM form_masuk WHERE status = 'bot' ORDER BY id DESC LIMIT 100"),
+    'bot'   => all("SELECT " . FORM_KOLOM_DAFTAR . " FROM form_masuk f WHERE f.status = 'bot' ORDER BY f.id DESC LIMIT 100"),
     default => $perlu,
 };
 if (!in_array($filter, ['semua', 'bot'], true)) $filter = 'cek';

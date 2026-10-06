@@ -23,7 +23,7 @@
  * Semua langkah aman diulang: kolom diperiksa dulu di information_schema,
  * baris contoh hanya dibuat kalau belum ada. Kalau pengguna database tidak
  * punya hak ALTER, galatnya dicatat ke error_log dan panel menampilkan
- * peringatan — migration-v22.sql tetap bisa dijalankan manual.
+ * peringatan — db/migration-v23.sql tetap bisa dijalankan manual.
  */
 
 const SKEMA_VERSI = 23;
@@ -198,6 +198,19 @@ function skemaV23(): void
         KEY `idx_form_wa` (`wa`)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+    // Template lama (v20) menyimpan harga per baris. Model sekarang "paket +
+    // rincian isi": harga ada di paket, baris isi tanpa harga. Jumlah baris
+    // isinya dipindah jadi harga paket supaya tidak tercetak sebagai
+    // "tambahan" di PDF dan tidak hilang saat paketnya disunting.
+    q("UPDATE quote_templates t
+         JOIN (SELECT template_id, SUM(harga * qty) s FROM quote_template_items
+                WHERE opsional = 0 GROUP BY template_id HAVING s > 0) x ON x.template_id = t.id
+          SET t.harga = x.s, t.harga_mulai = 0
+        WHERE t.harga IS NULL");
+    q("UPDATE quote_template_items i JOIN quote_templates t ON t.id = i.template_id
+          SET i.harga = 0
+        WHERE i.opsional = 0 AND i.harga <> 0 AND t.harga IS NOT NULL");
+
     skemaBenihPaket();
 }
 
@@ -215,6 +228,20 @@ function skemaV23(): void
 function skemaBenihPaket(): void
 {
     if (setting('paket_benih', '') === '1') return;
+    // Dua permintaan pertama yang datang bersamaan tidak boleh sama-sama
+    // menanam paket. Kunci MariaDB + baca ulang penanda langsung dari tabel
+    // (bukan dari cache setting per permintaan).
+    if ((int) (one("SELECT GET_LOCK('callalily_benih', 10) g")['g'] ?? 0) !== 1) return;
+    try {
+        if ((one("SELECT v FROM settings WHERE k = 'paket_benih'")['v'] ?? '') === '1') return;
+        skemaBenihPaketIsi();
+    } finally {
+        q("SELECT RELEASE_LOCK('callalily_benih')");
+    }
+}
+
+function skemaBenihPaketIsi(): void
+{
 
     $syarat = "Harga berlaku sampai tanggal yang tertulis di atas.\n"
             . "DP 30% untuk mengunci tanggal; sisa pembayaran mengikuti termin di bawah.\n"

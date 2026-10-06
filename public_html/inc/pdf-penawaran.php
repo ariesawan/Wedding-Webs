@@ -158,6 +158,7 @@ function quotePdf(int $quoteId): string
     if ($qq['guest_estimate']) $info[] = ['Perkiraan tamu', '±' . number_format((int) $qq['guest_estimate'], 0, ',', '.') . ' tamu'];
     $kol = $lebar / max(1, count($info));
     $yInfo = $pdf->GetY();
+    $yMaks = $yInfo;
     foreach ($info as $i => [$lbl, $val]) {
         $pdf->SetXY(16 + $i * $kol, $yInfo);
         $pdf->SetFont('Helvetica', '', 7);
@@ -166,8 +167,11 @@ function quotePdf(int $quoteId): string
         $pdf->SetFont('Helvetica', 'B', 9.5);
         $pdf->warna(PdfPenawaran::TINTA);
         $pdf->MultiCell($kol - 3, 4.6, pdfTeks($val), 0, 'L');
+        $yMaks = max($yMaks, $pdf->GetY());
     }
-    $pdf->SetY($yInfo + 14);
+    // Nama atau lokasi yang panjang turun ke baris berikutnya — kotak paket
+    // mulai di bawah kolom yang paling tinggi, bukan di jarak tetap.
+    $pdf->SetY(max($yInfo + 14, $yMaks + 3));
 
     // ---------- Kotak paket ----------
     if ($d['paket']) {

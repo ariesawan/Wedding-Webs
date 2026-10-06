@@ -81,13 +81,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ((array) ($_POST['item'] ?? []) as $iid => $row) {
                 $qty = max(0.01, (float) str_replace(',', '.', (string) ($row['qty'] ?? 1)));
                 q("UPDATE quote_template_items
-                      SET kelompok = ?, label = ?, detail = ?, qty = ?, satuan = ?, harga = ?, sort_order = ?
+                      SET kelompok = ?, label = ?, detail = ?, qty = ?, satuan = ?, sort_order = ?
                     WHERE id = ? AND template_id = ?",
                   [mb_substr(trim($row['kelompok'] ?? ''), 0, 80),
                    mb_substr(trim($row['label'] ?? ''), 0, 190),
                    mb_substr(trim($row['detail'] ?? ''), 0, 400),
                    $qty, mb_substr(trim($row['satuan'] ?? 'paket'), 0, 30) ?: 'paket',
-                   $uang($row['harga'] ?? 0), (int) ($row['sort'] ?? 0), (int) $iid, $tid]);
+                   (int) ($row['sort'] ?? 0), (int) $iid, $tid]);
+                // Harga hanya ditulis kalau kolomnya memang ada di formulir
+                // (baris tambahan opsional). Baris isi paket tidak punya kolom
+                // harga — menulis 0 di sana menghapus harga per baris template lama.
+                if (array_key_exists('harga', $row)) {
+                    q("UPDATE quote_template_items SET harga = ? WHERE id = ? AND template_id = ?",
+                      [$uang($row['harga']), (int) $iid, $tid]);
+                }
             }
             // Baris yang judulnya dikosongkan dihapus — cara paling cepat
             // membersihkan baris kerangka yang tidak dipakai paket ini.
@@ -112,7 +119,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         elseif ($act === 'web') {
             q("UPDATE quote_templates SET tampil_web = 1 - tampil_web WHERE id = ?", [$tid]);
-            $t = one("SELECT nama, tampil_web FROM quote_templates WHERE id = ?", [$tid]);
+            $t = one("SELECT nama, slug, tampil_web FROM quote_templates WHERE id = ?", [$tid]);
+            // Paket lama belum punya slug — tanpa slug, tombol "Pilih paket ini"
+            // di situs tidak bisa membawa pilihannya ke formulir.
+            if ($t['slug'] === '') q("UPDATE quote_templates SET slug = ? WHERE id = ?", [slugPaket($t['nama'], $tid), $tid]);
             flash($t['tampil_web'] ? 'Paket ' . $t['nama'] . ' tampil di price list situs.' : 'Paket ' . $t['nama'] . ' disembunyikan dari situs.');
             redirect('admin/paket.php');
         }
@@ -289,8 +299,7 @@ pageHead($t['nama'],
             <td><input type="text" name="item[<?= $k ?>][detail]" value="<?= e($r['detail']) ?>"></td>
             <td><input type="text" inputmode="decimal" name="item[<?= $k ?>][qty]" value="<?= rtrim(rtrim(number_format((float) $r['qty'], 2, '.', ''), '0'), '.') ?>"></td>
             <td><input type="text" name="item[<?= $k ?>][satuan]" value="<?= e($r['satuan']) ?>"></td>
-            <td class="actions"><button class="btn sm ghost danger" type="submit" form="h<?= $k ?>" title="Hapus">×</button>
-              <input type="hidden" name="item[<?= $k ?>][harga]" value="0"></td>
+            <td class="actions"><button class="btn sm ghost danger" type="submit" form="h<?= $k ?>" title="Hapus">×</button></td>
           </tr>
         <?php endforeach; ?>
         <?php if (!$isi): ?><tr><td colspan="6" class="sub" style="padding:16px">Belum ada isi.</td></tr><?php endif; ?>
@@ -359,9 +368,11 @@ pageHead($t['nama'],
   let ubah = false;
   f.addEventListener('input', () => { ubah = true; });
   f.addEventListener('submit', () => { ubah = false; });
-  ['fIsi', 'fOpsi', 'fDup'].forEach(id => document.getElementById(id).addEventListener('submit', e => {
-    if (ubah && !confirm('Ada perubahan yang belum disimpan. Lanjut tanpa menyimpan?')) e.preventDefault();
-  }));
+  // Termasuk tombol × hapus baris (formulir h<id>) — semuanya memuat ulang halaman.
+  [...['fIsi', 'fOpsi', 'fDup'].map(id => document.getElementById(id)), ...document.querySelectorAll('form[id^="h"]')]
+    .filter(Boolean).forEach(x => x.addEventListener('submit', e => {
+      if (ubah && !confirm('Ada perubahan yang belum disimpan. Lanjut tanpa menyimpan?')) e.preventDefault();
+    }));
   const fmt = v => { const a = String(v).replace(/\D/g, '').replace(/^0+(?=\d)/, ''); return a ? a.replace(/\B(?=(\d{3})+(?!\d))/g, '.') : ''; };
   document.querySelectorAll('input.uang').forEach(el => el.addEventListener('input', () => { el.value = fmt(el.value); }));
 })();

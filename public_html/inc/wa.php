@@ -149,19 +149,27 @@ function waKirimCloud(string $nomor, string $teks, ?array $berkas = null): array
         'type'              => 'text',
         'text'              => ['preview_url' => true, 'body' => $teks],
     ]);
-    // Dokumen dikirim sebagai pesan kedua: keterangan dokumen dibatasi 1024
-    // karakter, sedangkan teks penawaran sering lebih panjang.
-    if ($berkas && $r['code'] < 400) {
-        $d = httpJson('POST', $url, ['Authorization: Bearer ' . setting('wa_token')], [
-            'messaging_product' => 'whatsapp',
-            'recipient_type'    => 'individual',
-            'to'                => $nomor,
-            'type'              => 'document',
-            'document'          => ['link' => $berkas['url'], 'filename' => $berkas['nama'] ?? 'dokumen.pdf'],
-        ]);
-        waCatatLog('keluar', $d['raw'], $d['code']);
-    }
     waCatatLog('keluar', $r['raw'], $r['code']);
+    // Dokumen dikirim sebagai pesan kedua: keterangan dokumen dibatasi 1024
+    // karakter, sedangkan teks penawaran sering lebih panjang. Kalau
+    // lampirannya gagal, teksnya tetap sudah terkirim — dilaporkan terpisah,
+    // bukan sebagai kegagalan seluruh pengiriman.
+    $lampiranGagal = null;
+    if ($berkas && $r['code'] < 400) {
+        try {
+            $d = httpJson('POST', $url, ['Authorization: Bearer ' . setting('wa_token')], [
+                'messaging_product' => 'whatsapp',
+                'recipient_type'    => 'individual',
+                'to'                => $nomor,
+                'type'              => 'document',
+                'document'          => ['link' => $berkas['url'], 'filename' => $berkas['nama'] ?? 'dokumen.pdf'],
+            ]);
+            waCatatLog('keluar', $d['raw'], $d['code']);
+            if ($d['code'] >= 400) $lampiranGagal = $d['json']['error']['message'] ?? ('HTTP ' . $d['code']);
+        } catch (Throwable $e) {
+            $lampiranGagal = $e->getMessage();
+        }
+    }
 
     if ($r['code'] >= 400) {
         $m = $r['json']['error']['message'] ?? $r['raw'];
@@ -171,7 +179,8 @@ function waKirimCloud(string $nomor, string $teks, ?array $berkas = null): array
         }
         return ['ok' => false, 'id' => null, 'error' => $m];
     }
-    return ['ok' => true, 'id' => $r['json']['messages'][0]['id'] ?? null, 'error' => null];
+    return ['ok' => true, 'id' => $r['json']['messages'][0]['id'] ?? null, 'error' => null,
+            'lampiran_gagal' => $lampiranGagal];
 }
 
 /**

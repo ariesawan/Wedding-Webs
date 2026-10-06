@@ -361,27 +361,49 @@ function quoteKirimWA(int $quoteId, ?int $userId = null): array
  */
 function quoteCocok(int $quoteId, ?int $userId = null): array
 {
-    $qq = one("SELECT q.client_id, q.total, q.jenis, q.nomor, c.stage
+    $qq = one("SELECT q.client_id, q.total, q.jenis, q.nomor, q.revisi_dari, c.stage, c.deal_value
                FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$quoteId]);
     if (!$qq) throw new RuntimeException('Penawaran tidak ditemukan.');
     $cid = (int) $qq['client_id'];
     $jenis = $qq['jenis'] === 'pricelist' ? 'Price list' : 'Penawaran';
+    $total = (float) $qq['total'];
 
-    if ((float) $qq['total'] <= 0) {
+    if ($total <= 0) {
         throw new RuntimeException('Totalnya masih Rp 0 — isi harga paket dulu, karena DP 30% dihitung dari angka ini.');
     }
     if ($qq['stage'] === 'batal') {
         throw new RuntimeException('Klien ini tercatat tidak jadi. Aktifkan lagi dari halaman klien sebelum menandai cocok.');
     }
 
+    // Dokumen ini MENGGANTI kontrak atau MENAMBAHINYA?
+    //   - sebelum DP masuk (termasuk Menunggu DP): selalu mengganti — hanya
+    //     ada satu angka yang sedang ditagih DP-nya;
+    //   - sesudah DP: mengganti hanya kalau ini revisi dari dokumen yang
+    //     sudah disetujui; selain itu tambahan (mis. paket tambahan) yang
+    //     nilainya DITAMBAHKAN ke kontrak, bukan menimpanya.
+    $praDp = !stageSudahDeal($qq['stage']) && $qq['stage'] !== 'dp';
+    $dariCocok = $qq['revisi_dari']
+        ? (bool) one("SELECT id FROM quotes WHERE id = ? AND status = 'cocok'", [(int) $qq['revisi_dari']])
+        : false;
+    $ganti = !stageSudahDeal($qq['stage']) || $dariCocok;
+    $nilai = $ganti ? $total : (float) ($qq['deal_value'] ?? 0) + $total;
+
+    $lunas = (float) (one("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE client_id = ? AND paid_at IS NOT NULL",
+                          [$cid])['v'] ?? 0);
+    if ($nilai < $lunas) {
+        throw new RuntimeException('Nilai kontrak baru (' . rupiah($nilai) . ') lebih kecil daripada yang sudah dibayar ('
+            . rupiah($lunas) . '). Periksa dulu termin di tab Pembayaran.');
+    }
+
     q("UPDATE quotes SET status = 'cocok', decided_at = NOW(), sent_at = COALESCE(sent_at, NOW())
        WHERE id = ?", [$quoteId]);
-    // Dokumen lain yang masih terbuka tidak lagi berlaku.
+    // Dokumen lain yang masih terbuka tidak lagi berlaku; yang dulu disetujui
+    // ikut gugur kalau dokumen ini menggantikannya.
     q("UPDATE quotes SET status = 'revisi'
-       WHERE client_id = ? AND id <> ? AND status IN ('draf','terkirim')", [$cid, $quoteId]);
-    q("UPDATE clients SET deal_value = ? WHERE id = ?", [$qq['total'], $cid]);
+       WHERE client_id = ? AND id <> ? AND status IN ('draf','terkirim'" . ($ganti ? ",'cocok'" : '') . ")", [$cid, $quoteId]);
+    q("UPDATE clients SET deal_value = ? WHERE id = ?", [$nilai, $cid]);
 
-    if (!stageSudahDeal($qq['stage']) && $qq['stage'] !== 'dp') {
+    if ($praDp) {
         $r = clientMajuKe($cid, 'dp', $userId, $jenis . ' ' . $qq['nomor'] . ' cocok.');
         if (!$r['changed']) $r = clientSetStage($cid, 'dp', $userId, $jenis . ' ' . $qq['nomor'] . ' cocok.');
         return ['tahap' => 'dp', 'info' => $r['info']];
@@ -389,9 +411,15 @@ function quoteCocok(int $quoteId, ?int $userId = null): array
 
     // Sudah di Menunggu DP / sudah deal: angka kontrak berubah.
     $n = terminSusun($cid) ?: terminSesuaikan($cid);
-    clientLog($cid, 'catatan', $jenis . ' ' . $qq['nomor'] . ' disetujui', 'Nilai kontrak ' . rupiah((float) $qq['total'])
-              . ($n ? " · $n termin disesuaikan" : ''), $userId);
-    $info = $n ? ["Nilai kontrak jadi " . rupiah((float) $qq['total']) . "; $n termin yang belum dibayar disesuaikan."] : [];
+    if ($qq['stage'] === 'dp' && ($dp = terminDp($cid)) && !$dp['paid_at']) {
+        // Tagihan DP di tindakan berikutnya ikut angka baru.
+        q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
+          ['Tagih ' . $dp['label'] . ' · ' . rupiah((float) $dp['amount']),
+           $dp['due_date'] ?: date('Y-m-d', strtotime('+3 day')), $cid]);
+    }
+    $ket = $ganti ? 'Nilai kontrak ' . rupiah($nilai) : 'Tambahan ' . rupiah($total) . ' · nilai kontrak jadi ' . rupiah($nilai);
+    clientLog($cid, 'catatan', $jenis . ' ' . $qq['nomor'] . ' disetujui', $ket . ($n ? " · $n termin disesuaikan" : ''), $userId);
+    $info = ["$ket." . ($n ? " $n termin yang belum dibayar disesuaikan." : '')];
     return ['tahap' => $qq['stage'], 'info' => $info];
 }
 

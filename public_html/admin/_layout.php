@@ -37,7 +37,7 @@ function adminHead(string $title, string $active = ''): void
     $formCek = 0;
     if (in_array($u['role'] ?? '', ['owner', 'admin_early'], true)) {
         require_once __DIR__ . '/../inc/formulir.php';
-        $formCek = count(formPerluCek(30));
+        $formCek = formPerluCekJumlah(30);
     }
 
     $pendingMeetings = (int) ($b['temu']  ?? 0);
@@ -195,7 +195,7 @@ function adminHead(string $title, string $active = ''): void
 <?php
     if ($skemaGalat !== '') {
         echo '<div class="flash warn"><span>Struktur database belum bisa diperbarui otomatis: ' . e($skemaGalat)
-           . '. Jalankan <b>db/migration-v22.sql</b> lewat phpMyAdmin, lalu muat ulang.</span></div>';
+           . '. Jalankan <b>db/migration-v' . SKEMA_VERSI . '.sql</b> lewat phpMyAdmin, lalu muat ulang.</span></div>';
     }
     if ($f = flash()) {
         $cls = $f['type'] === 'err' ? 'err' : ($f['type'] === 'warn' ? 'warn' : 'ok');

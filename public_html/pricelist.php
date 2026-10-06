@@ -74,7 +74,7 @@ require __DIR__ . '/partials/public-head.php';
     <?php foreach ($paket as $t):
       $isi = paketIsi((int) $t['id']);
       $hl  = paketHargaLabel($t);
-      $slug = $t['slug'] ?: ('paket-' . (int) $t['id']); ?>
+      $slug = $t['slug'] ?: (string) (int) $t['id'];   // formulir juga menerima id ?>
       <article class="pl<?= !empty($t['unggulan']) ? ' unggul' : '' ?>" id="<?= e($slug) ?>">
         <?php if (!empty($t['unggulan'])): ?><span class="tanda"><?= te('Paling dipilih') ?></span><?php endif; ?>
         <h2><?= e($t['nama']) ?></h2>

@@ -283,7 +283,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pm = (int) $_POST['paket_minat'];
                 $pt = $pm ? one("SELECT id, nama FROM quote_templates WHERE id = ?", [$pm]) : null;
                 $data['paket_minat'] = $pt ? (int) $pt['id'] : null;
-                $data['package']     = $pt ? $pt['nama'] : '';
+                // Teks lama (klien sebelum v23) dibiarkan kalau tidak memilih paket.
+                if ($pt) $data['package'] = $pt['nama'];
             }
             if ($ada('budget_estimate')) $data['budget_estimate'] = $uang('budget_estimate');
             if ($ada('deal_value'))      $data['deal_value']      = $uang('deal_value');
@@ -334,6 +335,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // Tanggal nikah bergeser -> seluruh checklist ikut digeser.
                 $tglBaru = $data['wedding_date'] ?? null;
                 if ($tglBaru && $lama['wedding_date'] !== $tglBaru) {
+                    // Termin yang dihitung mundur dari hari-H ikut bergeser, dan
+                    // klien deal yang belum punya event (tanggal baru diketahui
+                    // setelah DP) dibuatkan sekarang.
+                    $nt = terminGeser($id, $tglBaru);
+                    if ($nt) clientLog($id, 'sistem', 'Jatuh tempo termin digeser', "$nt termin mengikuti tanggal baru.", $user['id']);
+                    if (eventPastikan($id)) flash('Data klien tersimpan. Event dibuat di menu Event.');
                     $n = retimeTasks($id, $tglBaru);
                     if ($n) {
                         clientLog($id, 'sistem', 'Tanggal pernikahan diubah', "Jatuh tempo $n langkah checklist ikut digeser.", $user['id']);
@@ -454,6 +461,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         elseif ($act === 'stage') {
             $id = (int) $_POST['id'];
+            // Admin office hanya memindahkan klien yang sudah DP, dan tidak
+            // mundur ke tahap sebelum DP (kecuali menandai tidak jadi). Serah
+            // terima hanya lewat konfirmasi DP oleh admin early / owner.
+            if (($user['role'] ?? '') === 'admin_office') {
+                $kini = (string) (one("SELECT stage FROM clients WHERE id = ?", [$id])['stage'] ?? '');
+                $ke   = (string) ($_POST['stage'] ?? '');
+                if (!stageSudahDeal($kini) || (!stageSudahDeal($ke) && $ke !== 'batal'))
+                    throw new RuntimeException('Tahap sebelum DP dipegang admin early.');
+            }
             $r  = clientSetStage($id, $_POST['stage'] ?? '', $user['id'], trim($_POST['note'] ?? ''));
             flash('Tahap diperbarui.' . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
             redirect('admin/klien.php?id=' . $id);
@@ -646,6 +662,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Lewat dpDiterima supaya tahap, event, dan pegangan ikut pindah.
             $cDp = one("SELECT stage FROM clients WHERE id = ?", [(int) $p['client_id']]);
             if (!$p['paid_at'] && ($cDp['stage'] ?? '') === 'dp' && (int) (terminDp((int) $p['client_id'])['id'] ?? 0) === $pid) {
+                if (!in_array($user['role'] ?? '', ['owner', 'admin_early'], true))
+                    throw new RuntimeException('Konfirmasi DP dilakukan admin early atau owner.');
                 $r = dpDiterima((int) $p['client_id'], (int) $user['id']);
                 flash($p['label'] . ' diterima — klien sekarang Deal dan dipegang admin office.'
                     . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));

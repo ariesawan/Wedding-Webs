@@ -165,6 +165,18 @@ CREATE TABLE IF NOT EXISTS `form_masuk` (
 
 DROP PROCEDURE IF EXISTS `v23_tambah_kolom`;
 
+-- Template lama menyimpan harga per baris; model sekarang "paket + rincian
+-- isi" — jumlahnya dipindah jadi harga paket (sekali saja: hanya template
+-- yang harga paketnya masih kosong).
+UPDATE quote_templates t
+  JOIN (SELECT template_id, SUM(harga * qty) s FROM quote_template_items
+         WHERE opsional = 0 GROUP BY template_id HAVING s > 0) x ON x.template_id = t.id
+   SET t.harga = x.s, t.harga_mulai = 0
+ WHERE t.harga IS NULL;
+UPDATE quote_template_items i JOIN quote_templates t ON t.id = i.template_id
+   SET i.harga = 0
+ WHERE i.opsional = 0 AND i.harga <> 0 AND t.harga IS NOT NULL;
+
 -- Penanda: kode tidak perlu mencoba lagi. paket_benih sengaja tidak disentuh
 -- supaya paket contoh dibuat otomatis saat halaman berikutnya dibuka.
 INSERT INTO `settings` (`k`, `v`, `is_secret`) VALUES ('skema_versi', '23', 0), ('skema_galat', '', 0)
