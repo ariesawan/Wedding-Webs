@@ -213,7 +213,7 @@ menandai `reminder_sent_at` supaya tidak terkirim dua kali.
 ## 11. Pipeline klien — dari prospek sampai hari-H
 
 Setiap klien punya satu tahap dan satu tindakan berikutnya yang bertanggal.
-Kalau tanggal itu lewat, klien muncul di **Hari ini** pada Ringkasan.
+Kalau tanggal itu lewat, klien naik di **antrean** pada Ringkasan.
 
 ```
 Prospek baru → Price list terkirim → Menunggu DP → Deal · penyusunan → Persiapan → Hari-H → Selesai
@@ -272,8 +272,8 @@ tidak menyeretnya mundur.
 `/form` (dan `form.callalily.party`) hanya menanyakan biodata awal + paket.
 **Setiap kiriman tercatat** di menu **Formulir masuk** — termasuk yang ditolak
 penjagaan anti-bot, gagal validasi, atau galat database. Yang belum jadi klien
-muncul di Ringkasan sebagai "Kiriman formulir belum jadi klien" dan bisa
-dijadikan klien dengan satu tombol. Nomor WA dicocokkan dari 9 digit terakhir,
+muncul di antrean Ringkasan admin early sebagai "Kiriman formulir gagal jadi
+klien" dan bisa dijadikan klien dengan satu tombol. Nomor WA dicocokkan dari 9 digit terakhir,
 jadi kiriman ulang tidak membuat klien kembar.
 
 ### Tautan price list untuk klien
@@ -282,12 +282,42 @@ Teks WhatsApp memuat tautan `…/penawaran.php?t=…` (rincian di HP) dan
 `…&pdf=1` (berkas PDF). Halaman itu hanya-baca, tidak diindeks, dan mencatat
 kapan klien pertama kali membukanya.
 
+### Ringkasan per peran (v24)
+
+`admin/index.php` + `inc/ringkasan.php`. Admin early dan admin office melihat
+**antrean "kerjakan dari atas"**: satu baris per klien, bertingkat *Mendesak /
+Hari ini / Segera*, dengan alasan tertulis dan 1–2 tombol yang memanggil
+handler yang sudah ada (DP masuk, tagih, lunas, centang checklist, hasil
+konsultasi, klien cocok, jadikan klien, tunda). Setelah aksi, halaman kembali
+ke baris berikutnya (`kembali=ringkasan` — hanya tiga nilai yang diterima).
+Owner melihat angka bulan ini, *Perlu keputusanmu*, antrean tim (dengan
+pratinjau `?lihat=early|office`), arus kas, tanggal terisi, dan corong.
+Aturan uang: sisa = `amount − terbayar`; uang diterima = penerimaan
+berstatus *sah* menurut tanggal terima; piutang hanya dari klien yang sudah DP.
+
+### Termin pembayaran (v24)
+
+`payments` = jadwal (nominal, `terbayar`, tempo); `payment_receipts` = uang
+masuk per transfer dengan nomor kwitansi. Hanya `bayarHitungUlang()` yang
+menulis `terbayar`/`paid_at`. Pembayaran boleh sebagian; kelebihan dialokasikan
+ke termin berikutnya; pembatalan mengembalikan termin. Kwitansi PDF dibuka
+lewat tautan bertanda tangan (`dokumen.php`). Bukti transfer disimpan di
+folder privat (di luar web root bila bisa, kalau tidak dikunci `.htaccess`).
+
+### Dashboard pengantin (v24)
+
+`/p/{token}` → `portal.php`. Aktif setelah DP lunas, mati saat batal atau
+dimatikan dari klien / Pengaturan. Klien hanya bisa mengisi data keluarga,
+prosesi adat, dan referensi dekor (whitelist), dikunci mulai H-30, maksimal
+30 simpan per hari. Halaman tidak diindeks, tidak di-cache, dan memakai CSP
+ketat.
+
 ### Struktur database
 
 Kolom dan tabel yang dibutuhkan kode ditambahkan sendiri saat halaman pertama
 dibuka setelah unggah (`inc/skema.php`). Kalau hosting menolak, panel owner
-menampilkan peringatan kuning — jalankan `db/migration-v23.sql` lewat
-phpMyAdmin.
+menampilkan peringatan kuning — jalankan `db/migration-v24.sql` lewat
+phpMyAdmin (gabungan v22–v24, aman diulang).
 
 ---
 
@@ -375,8 +405,10 @@ Cukup satu baris untuk semua pekerjaan harian:
 ```
 
 Yang dikerjakan: pengingat H-1 pertemuan, perpindahan tahap otomatis
-(persiapan → hari-H → selesai), pencatatan termin yang mendekati jatuh tempo,
-dan sinkronisasi spreadsheet bila diaktifkan.
+(persiapan → hari-H → selesai), pengingat pembayaran lewat WhatsApp (bila
+dinyalakan di Pengaturan → *Pengingat pembayaran*; bawaan mati), dan
+sinkronisasi spreadsheet bila diaktifkan. Waktu cron terakhir berjalan
+tampil di kartu Pengingat pembayaran.
 
 `cron/reminder.php` masih ada dan hanya menjalankan pengingat, untuk kompatibilitas
 dengan cron lama.
