@@ -15,7 +15,7 @@ function adminHead(string $title, string $active = ''): void
     // Lencana Klien mengikuti bagian masing-masing peran: admin office tidak
     // perlu melihat angka merah dari prospek yang bukan pegangannya.
     $lingkup = match ($u['role'] ?? '') {
-        'admin_early'            => "stage IN ('baru','pricelist','spesifikasi','penawaran')",
+        'admin_early'            => "stage IN ('baru','pricelist','dp','spesifikasi','penawaran')",
         'admin_office', 'editor' => "stage IN ('deal','persiapan','harih')",
         default                  => "stage NOT IN ('selesai','batal')",
     };
@@ -30,6 +30,15 @@ function adminHead(string $title, string $active = ''): void
            WHERE c.stage IN ('batal','selesai')
              AND NOT EXISTS (SELECT 1 FROM client_analisa a WHERE a.client_id = c.id)) AS analisa
     ") ?: [];
+
+    // Kiriman formulir yang gagal jadi klien. Terpisah dari query di atas:
+    // tabelnya baru ada sejak skema v23, dan galatnya tidak boleh ikut
+    // menjatuhkan lencana yang lain.
+    $formCek = 0;
+    if (in_array($u['role'] ?? '', ['owner', 'admin_early'], true)) {
+        require_once __DIR__ . '/../inc/formulir.php';
+        $formCek = count(formPerluCek(30));
+    }
 
     $pendingMeetings = (int) ($b['temu']  ?? 0);
     $drafts          = (int) ($b['draf']  ?? 0);
@@ -49,7 +58,8 @@ function adminHead(string $title, string $active = ''): void
         ['klien',      'klien.php',      'Klien',       '◐', $overdue,      ''],
         ['jadwal',     'jadwal.php',     'Jadwal',      '◷', $pendingMeetings, ''],
         ['inbox',      'inbox.php',      'Kotak masuk', '✉', 0,             ''],
-        ['template-penawaran', 'template-penawaran.php', 'Template penawaran', '❏', 0, 'Penjualan'],
+        ['formulir',   'formulir.php',   'Formulir masuk', '⇲', $formCek,    'Penjualan'],
+        ['paket',      'paket.php',      'Paket & price list', '❏', 0,        'Penjualan'],
         ['analisa',    'analisa.php',    'Analisa',     '◭', $belumAnalisa, 'Penjualan'],
         ['vendor',     'vendor.php',     'Vendor',      '⌂', 0,             'Produksi'],
         ['vendor-kategori','vendor-kategori.php','Kategori vendor', '◇', 0, 'Produksi'],

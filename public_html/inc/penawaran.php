@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/chat.php';
 require_once __DIR__ . '/pipeline.php';
+require_once __DIR__ . '/paket.php';
 
 /**
  * ============================================================
@@ -51,6 +52,22 @@ function quoteNomor(int $clientId): string
  * lalu harga vendor yang sudah dipilih, lalu 0 (biar terlihat kosong dan
  * diisi manual — lebih baik daripada menebak angka yang salah).
  */
+/** Baris quotes baru (draf, tanpa isi). */
+function quoteBaru(array $c, string $jenis, ?int $userId): int
+{
+    $tipe   = $c['tipe_klien'] ?: 'tematis';
+    $plafon = $tipe === 'budgeting' ? (float) ($c['budget_estimate'] ?? 0) : null;
+    $revisi = (int) (one("SELECT COALESCE(MAX(revisi),0) r FROM quotes WHERE client_id = ?", [$c['id']])['r'] ?? 0) + 1;
+
+    q("INSERT INTO quotes (client_id, nomor, revisi, tipe, jenis, status, plafon,
+                           valid_until, token, created_by)
+       VALUES (?,?,?,?,?, 'draf', ?, ?, ?, ?)",
+      [$c['id'], quoteNomor((int) $c['id']), $revisi, $tipe, $jenis, $plafon,
+       date('Y-m-d', strtotime('+' . (int) setting('quote_valid_days', '14') . ' day')),
+       bin2hex(random_bytes(16)), $userId]);
+    return insertId();
+}
+
 function quoteBuat(int $clientId, string $jenis = 'penawaran', ?int $userId = null): int
 {
     $c = one("SELECT * FROM clients WHERE id = ?", [$clientId]);
@@ -58,17 +75,7 @@ function quoteBuat(int $clientId, string $jenis = 'penawaran', ?int $userId = nu
 
     $tipe   = $c['tipe_klien'] ?: 'tematis';
     $plafon = $tipe === 'budgeting' ? (float) ($c['budget_estimate'] ?? 0) : null;
-
-    $revisi = (int) (one("SELECT COALESCE(MAX(revisi),0) r FROM quotes WHERE client_id = ?", [$clientId])['r'] ?? 0) + 1;
-
-    q("INSERT INTO quotes (client_id, nomor, revisi, tipe, jenis, status, plafon,
-                           valid_until, token, created_by)
-       VALUES (?,?,?,?,?, 'draf', ?, ?, ?, ?)",
-      [$clientId, quoteNomor($clientId), $revisi, $tipe, $jenis, $plafon,
-       date('Y-m-d', strtotime('+' . (int) setting('quote_valid_days', '14') . ' day')),
-       bin2hex(random_bytes(16)), $userId]);
-
-    $qid = insertId();
+    $qid    = quoteBaru($c, $jenis, $userId);
 
     // Kebutuhan yang sudah dipilih klien, diurutkan menurut prioritas acara.
     $urutan = "FIELD(vc.slug, '" . implode("','", QUOTE_PRIORITAS) . "')";
@@ -110,97 +117,196 @@ function quoteBuat(int $clientId, string $jenis = 'penawaran', ?int $userId = nu
     return $qid;
 }
 
-/** Hitung ulang subtotal/total. Item opsional TIDAK masuk total. */
+/**
+ * Price list / penawaran dari paket: "paket + rincian isi".
+ *
+ * Harga paket disimpan di quotes.paket_harga; baris isinya disalin dengan
+ * harga 0 (artinya "termasuk paket"), tambahan opsional tetap dengan
+ * harganya. Isinya SALINAN — mengubah paket besok tidak mengubah dokumen
+ * yang sudah dipegang klien.
+ */
+function quoteDariPaket(int $clientId, int $tplId, string $jenis = 'pricelist', ?int $userId = null): int
+{
+    $c = one("SELECT * FROM clients WHERE id = ?", [$clientId]);
+    if (!$c) throw new RuntimeException('Klien tidak ditemukan.');
+    $t = one("SELECT * FROM quote_templates WHERE id = ?", [$tplId]);
+    if (!$t) throw new RuntimeException('Paket tidak ditemukan.');
+
+    $qid = quoteBaru($c, $jenis, $userId);
+    $harga = (float) ($t['harga'] ?? 0);
+    q("UPDATE quotes SET template_id = ?, paket_nama = ?, paket_harga = ?, catatan = ? WHERE id = ?",
+      [$tplId, $t['nama'], $harga > 0 ? $harga : null, (string) $t['catatan_bawaan'], $qid]);
+
+    // Satuan yang bergantung jumlah tamu ikut menyesuaikan klien ini — porsi
+    // katering paket 400 tamu tidak boleh tercetak 400 untuk klien 150 tamu.
+    $tamu = (int) ($c['guest_estimate'] ?? 0);
+    foreach (all("SELECT * FROM quote_template_items WHERE template_id = ? ORDER BY sort_order, id", [$tplId]) as $i => $r) {
+        $qty = (float) $r['qty'];
+        if ($tamu > 0 && in_array(strtolower((string) $r['satuan']), ['porsi', 'pax', 'tamu', 'kursi', 'orang tamu'], true)) {
+            $qty = $tamu;
+        }
+        $hrg = (float) $r['harga'];
+        q("INSERT INTO quote_items (quote_id, category_id, kelompok, label, detail, qty, satuan, harga, jumlah, opsional, sort_order)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+          [$qid, $r['category_id'], (string) ($r['kelompok'] ?? ''), $r['label'], $r['detail'], $qty, $r['satuan'],
+           $hrg, $hrg * $qty, (int) $r['opsional'], ($i + 1) * 10]);
+    }
+    quoteHitung($qid);
+    return $qid;
+}
+
+/**
+ * Hitung ulang subtotal/total.
+ * Subtotal = harga paket + baris berharga yang tidak opsional. Opsional TIDAK
+ * masuk total — itu tawaran tambahan, bukan bagian dari angka yang disetujui.
+ */
 function quoteHitung(int $quoteId): array
 {
     $r = one("SELECT COALESCE(SUM(CASE WHEN opsional = 0 THEN jumlah ELSE 0 END),0) wajib,
                      COALESCE(SUM(CASE WHEN opsional = 1 THEN jumlah ELSE 0 END),0) opsi
               FROM quote_items WHERE quote_id = ?", [$quoteId]);
+    $qq = one("SELECT diskon, paket_harga FROM quotes WHERE id = ?", [$quoteId]);
 
-    $sub = (float) $r['wajib'];
-    $dis = (float) (one("SELECT diskon FROM quotes WHERE id = ?", [$quoteId])['diskon'] ?? 0);
+    $paket = (float) ($qq['paket_harga'] ?? 0);
+    $sub   = $paket + (float) $r['wajib'];
+    $dis   = (float) ($qq['diskon'] ?? 0);
 
     q("UPDATE quotes SET subtotal = ?, total = ? WHERE id = ?", [$sub, max(0, $sub - $dis), $quoteId]);
-    return ['subtotal' => $sub, 'opsional' => (float) $r['opsi'], 'total' => max(0, $sub - $dis)];
+    return ['paket' => $paket, 'tambahan' => (float) $r['wajib'], 'subtotal' => $sub,
+            'opsional' => (float) $r['opsi'], 'total' => max(0, $sub - $dis)];
+}
+
+/**
+ * Semua bahan dokumen dalam satu bentuk — dipakai teks WA, halaman publik,
+ * PDF, dan pratinjau admin, supaya keempatnya tidak pernah berbeda isi.
+ */
+function quoteData(int $quoteId): ?array
+{
+    $qq = one("SELECT q.*, c.name, c.partner_name, c.wedding_date, c.wedding_time, c.venue, c.city,
+                      c.guest_estimate, c.stage, c.phone
+               FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$quoteId]);
+    if (!$qq) return null;
+    $items = all("SELECT * FROM quote_items WHERE quote_id = ? ORDER BY sort_order, id", [$quoteId]);
+
+    $isi = $tambahan = $opsi = [];
+    foreach ($items as $it) {
+        if ($it['opsional'])                 $opsi[] = $it;
+        elseif ((float) $it['jumlah'] > 0)   $tambahan[] = $it;
+        else                                 $isi[] = $it;
+    }
+    $isPaket = trim((string) ($qq['paket_nama'] ?? '')) !== '';
+    return [
+        'q'        => $qq,
+        'paket'    => $isPaket,
+        'jenisLbl' => $qq['jenis'] === 'pricelist' ? 'Price list' : 'Penawaran',
+        'nama'     => trim($qq['name'] . ($qq['partner_name'] ? ' & ' . $qq['partner_name'] : '')),
+        'isi'      => kelompokkan($isi),
+        'tambahan' => $tambahan,
+        'opsi'     => $opsi,
+        'termin'   => (float) $qq['total'] > 0 ? terminKlien((float) $qq['total'], $qq['wedding_date']) : [],
+        'rekening' => rekeningBaris(),
+        'wa'       => waNomorPic((string) $qq['stage']),
+        'urlHal'   => url('penawaran.php?t=' . $qq['token']),
+        'urlPdf'   => url('penawaran.php?t=' . $qq['token'] . '&pdf=1'),
+        'berkas'   => quoteNamaBerkas($qq),
+    ];
+}
+
+/** "PriceList-Prasaja-CLP-2610-0012-9.pdf" */
+function quoteNamaBerkas(array $qq): string
+{
+    $jenis = $qq['jenis'] === 'pricelist' ? 'PriceList' : 'Penawaran';
+    $paket = trim((string) ($qq['paket_nama'] ?? '')) !== '' ? '-' . preg_replace('/[^A-Za-z0-9]+/', '', ucwords((string) $qq['paket_nama'])) : '';
+    return $jenis . mb_substr($paket, 0, 30) . '-' . preg_replace('/[^A-Za-z0-9]+/', '-', (string) $qq['nomor']) . '.pdf';
+}
+
+/** Persen tanpa nol berlebih: 30, 12,5 */
+function persenTeks($p): string
+{
+    return rtrim(rtrim(number_format((float) $p, 2, ',', '.'), '0'), ',');
 }
 
 /**
  * Rangkai penawaran jadi pesan WhatsApp.
  *
- * Sengaja teks biasa, bukan tautan PDF. Klien Indonesia membaca penawaran
- * di layar HP sambil chat — kalau harus mengunduh dulu, tingkat baca turun
- * jauh. Tautan rincian tetap disertakan untuk yang mau lihat lengkap.
+ * Isinya ringkas dan bisa dibaca di layar HP; dokumen lengkapnya ikut
+ * terlampir sebagai PDF (atau ditautkan bila penyedia WA tidak bisa
+ * melampirkan berkas).
  */
 function quoteTeksWA(int $quoteId): string
 {
-    $qq = one("SELECT q.*, c.name, c.partner_name, c.wedding_date, c.venue, c.guest_estimate
-               FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$quoteId]);
-    if (!$qq) return '';
-
-    $items = all("SELECT * FROM quote_items WHERE quote_id = ? ORDER BY sort_order", [$quoteId]);
-    $nama  = trim($qq['name'] . ($qq['partner_name'] ? ' & ' . $qq['partner_name'] : ''));
+    $d = quoteData($quoteId);
+    if (!$d) return '';
+    $qq = $d['q'];
+    $brand = setting('site_name', 'Callalily Party');
 
     $b = [];
-    $b[] = '*' . ($qq['jenis'] === 'pricelist' ? 'PRICE LIST' : 'PENAWARAN') . ' — CALLALILY PARTY*';
-    $b[] = 'No. ' . $qq['nomor'] . ($qq['revisi'] > 1 ? ' (revisi ' . $qq['revisi'] . ')' : '');
+    $b[] = 'Halo ' . $d['nama'] . ',';
+    $b[] = 'Berikut ' . strtolower($d['jenisLbl']) . ' dari *' . $brand . '*:';
     $b[] = '';
-    $b[] = 'Untuk: *' . $nama . '*';
+    $b[] = '*' . strtoupper($d['jenisLbl']) . '* · No. ' . $qq['nomor'] . ($qq['revisi'] > 1 ? ' (revisi ' . $qq['revisi'] . ')' : '');
     if ($qq['wedding_date'])   $b[] = 'Tanggal: ' . tanggalID($qq['wedding_date']);
-    if ($qq['venue'])          $b[] = 'Lokasi: ' . $qq['venue'];
-    if ($qq['guest_estimate']) $b[] = 'Estimasi tamu: ' . number_format((int) $qq['guest_estimate'], 0, ',', '.');
+    if ($qq['venue'] || $qq['city']) $b[] = 'Lokasi: ' . ($qq['venue'] ?: $qq['city']);
+    if ($qq['guest_estimate']) $b[] = 'Perkiraan tamu: ' . number_format((int) $qq['guest_estimate'], 0, ',', '.');
     $b[] = '';
 
-    if ($qq['tipe'] === 'budgeting' && $qq['plafon'] > 0) {
-        $b[] = '_Disusun menyesuaikan anggaran ' . rupiah((float) $qq['plafon']) . '._';
+    if ($d['paket']) {
+        $b[] = '*Paket ' . $qq['paket_nama'] . '*' . ((float) $qq['paket_harga'] > 0 ? ' — ' . rupiah((float) $qq['paket_harga']) : '');
+    }
+    if ($d['isi']) {
+        $b[] = $d['paket'] ? 'Termasuk:' : '*Rincian*';
+        foreach ($d['isi'] as $kel => $baris) {
+            $b[] = '_' . $kel . '_';
+            foreach ($baris as $it) {
+                $x = array_filter([$it['detail'], qtyTeks($it)]);
+                $b[] = '• ' . $it['label'] . ($x ? ' (' . implode(', ', $x) . ')' : '');
+            }
+        }
+    }
+    if ($d['tambahan']) {
         $b[] = '';
-    }
-
-    $b[] = '*Rincian*';
-    $wajib = array_filter($items, fn($i) => !$i['opsional']);
-    $opsi  = array_filter($items, fn($i) => $i['opsional']);
-
-    foreach ($wajib as $it) {
-        $b[] = '• ' . $it['label'] . ($it['detail'] ? ' (' . $it['detail'] . ')' : '')
-             . ' — ' . rupiah((float) $it['jumlah']);
+        $b[] = $d['paket'] ? '*Tambahan*' : '*Rincian berbiaya*';
+        foreach ($d['tambahan'] as $it) $b[] = '• ' . $it['label'] . ($it['detail'] ? ' (' . $it['detail'] . ')' : '') . ' — ' . rupiah((float) $it['jumlah']);
     }
 
     $b[] = '';
-    $b[] = '*Total: ' . rupiah((float) $qq['total']) . '*';
-    if ($qq['diskon'] > 0) $b[] = '_Sudah termasuk potongan ' . rupiah((float) $qq['diskon']) . '._';
+    if ((float) $qq['total'] > 0) {
+        $b[] = '*Total: ' . rupiah((float) $qq['total']) . '*';
+        if ((float) $qq['diskon'] > 0) $b[] = '_Sudah termasuk potongan ' . rupiah((float) $qq['diskon']) . '._';
+    } else {
+        $b[] = '_Harga menyesuaikan susunan acara — kami konfirmasi lewat chat ini._';
+    }
 
-    if ($opsi) {
+    if ($d['opsi']) {
         $b[] = '';
-        $b[] = '*Bisa ditambahkan (di luar anggaran)*';
-        foreach ($opsi as $it) $b[] = '• ' . $it['label'] . ' — ' . rupiah((float) $it['jumlah']);
+        $b[] = '*Bisa ditambahkan*';
+        foreach ($d['opsi'] as $it) $b[] = '• ' . $it['label'] . ((float) $it['jumlah'] > 0 ? ' — ' . rupiah((float) $it['jumlah']) : '');
     }
 
-    $b[] = '';
-    $b[] = '*Termin pembayaran*';
-    foreach (all("SELECT * FROM payment_templates WHERE is_active = 1 ORDER BY urutan") as $t) {
-        $nominal = round((float) $qq['total'] * (float) $t['persen'] / 100);
-        $kapan = $t['offset_hari'] === null ? 'saat tanda tangan kontrak'
-                                            : 'H-' . (int) $t['offset_hari'];
-        $b[] = '• ' . $t['label'] . ' (' . rtrim(rtrim(number_format((float) $t['persen'], 2, ',', '.'), '0'), ',') . '%) — '
-             . rupiah($nominal) . ', ' . $kapan;
+    if ($d['termin']) {
+        $b[] = '';
+        $b[] = '*Pembayaran*';
+        foreach ($d['termin'] as $t) {
+            $b[] = '• ' . $t['label'] . ($t['persen'] !== null ? ' (' . persenTeks($t['persen']) . '%)' : '')
+                 . ' — ' . rupiah($t['amount']) . ($t['due_date'] ? ', paling lambat ' . tanggalID($t['due_date']) : '');
+        }
+        if ($d['rekening']) $b[] = 'Transfer ke ' . implode(' ', $d['rekening']);
     }
 
-    if ($qq['catatan']) { $b[] = ''; $b[] = $qq['catatan']; }
     if ($qq['valid_until']) { $b[] = ''; $b[] = '_Berlaku sampai ' . tanggalID($qq['valid_until']) . '._'; }
-
     $b[] = '';
-    $b[] = 'Rincian lengkap: ' . url() . '/penawaran.php?t=' . $qq['token'];
+    $b[] = 'Dokumen PDF: ' . $d['urlPdf'];
+    $b[] = 'Kalau cocok, balas pesan ini — kami bantu proses DP-nya. Terima kasih.';
 
     return implode("\n", $b);
 }
 
 /**
- * Tandai penawaran terkirim, lalu majukan tahap kliennya.
+ * Tandai terkirim, lalu majukan tahap kliennya ke "Price list terkirim".
  *
- * Satu pintu untuk dua cara kirim. Sebelumnya tahap hanya maju kalau
- * dikirim lewat WhatsApp otomatis; "Tandai terkirim" untuk kiriman manual —
- * cara yang paling sering dipakai — mengubah status penawaran tapi
- * membiarkan kliennya tertinggal di "Prospek baru", lengkap dengan tenggat
- * "Kirim price list" yang terus menyala merah padahal sudah dikirim.
+ * Satu pintu untuk dua cara kirim (WA otomatis dan kirim manual). Maju saja,
+ * tidak pernah mundur: price list tambahan untuk klien yang sudah DP tidak
+ * boleh menyeretnya kembali.
  */
 function quoteTandaiTerkirim(int $quoteId, ?int $userId = null): array
 {
@@ -211,32 +317,29 @@ function quoteTandaiTerkirim(int $quoteId, ?int $userId = null): array
                          sent_at = COALESCE(sent_at, NOW())
        WHERE id = ?", [$quoteId]);
 
-    $pl     = $qq['jenis'] === 'pricelist';
-    $kolom  = $pl ? 'pl_sent_at' : 'penawaran_sent_at';
+    $kolom = $qq['jenis'] === 'pricelist' ? 'pl_sent_at' : 'penawaran_sent_at';
     q("UPDATE clients SET $kolom = COALESCE($kolom, NOW()) WHERE id = ?", [$qq['client_id']]);
 
-    // Maju saja, tidak pernah mundur: price list tambahan untuk klien yang
-    // sudah deal tidak boleh menyeretnya kembali ke tahap Price list.
-    $r = clientMajuKe((int) $qq['client_id'], $pl ? 'pricelist' : 'penawaran', $userId,
-                      'Otomatis: ' . $qq['nomor'] . ' terkirim.');
-    return $r;
+    return clientMajuKe((int) $qq['client_id'], 'pricelist', $userId, 'Otomatis: ' . $qq['nomor'] . ' terkirim.');
 }
 
 /**
- * Kirim penawaran ke WhatsApp klien lewat room chat.
+ * Kirim ke WhatsApp klien lewat room chat, dengan PDF terlampir.
  * Pesannya masuk riwayat room, jadi terlihat sama seperti percakapan lain.
  */
 function quoteKirimWA(int $quoteId, ?int $userId = null): array
 {
-    $qq = one("SELECT q.*, c.phone, c.id cid FROM quotes q
-               JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$quoteId]);
-    if (!$qq)             return ['ok' => false, 'error' => 'Penawaran tidak ditemukan.'];
-    if (!$qq['phone'])    return ['ok' => false, 'error' => 'Klien belum punya nomor WhatsApp.'];
+    $d = quoteData($quoteId);
+    if (!$d)                  return ['ok' => false, 'error' => 'Penawaran tidak ditemukan.'];
+    if (!$d['q']['phone'])    return ['ok' => false, 'error' => 'Klien belum punya nomor WhatsApp.'];
 
-    $chatId = chatRoom($qq['phone']);
-    if (!$chatId)         return ['ok' => false, 'error' => 'Nomor WhatsApp klien tidak valid.'];
+    $chatId = chatRoom($d['q']['phone']);
+    if (!$chatId)             return ['ok' => false, 'error' => 'Nomor WhatsApp klien tidak valid.'];
 
-    $r = chatKirim($chatId, quoteTeksWA($quoteId), $userId, ['client_id' => (int) $qq['cid']]);
+    $r = chatKirim($chatId, quoteTeksWA($quoteId), $userId, [
+        'client_id' => (int) $d['q']['client_id'],
+        'berkas'    => ['url' => $d['urlPdf'], 'nama' => $d['berkas']],
+    ]);
 
     if ($r['ok']) {
         q("UPDATE quotes SET sent_wa_id = ? WHERE id = ?", [$r['id'] ?? null, $quoteId]);
@@ -247,17 +350,14 @@ function quoteKirimWA(int $quoteId, ?int $userId = null): array
 }
 
 /**
- * Klien setuju.
+ * Klien cocok.
  *
- * Arti "setuju" bergantung jenis dokumennya:
- *   price list → klien cocok dengan kisaran harga; lanjut menggali
- *                spesifikasi (konsultasi, kebutuhan vendor) — BELUM deal.
- *   penawaran  → deal. Nilai deal = total penawaran ini, termin disusun,
- *                klien pindah ke admin office.
+ * Alur owner: cocok → DP 30% → admin office. Jadi "cocok" memindahkan klien
+ * ke tahap Menunggu DP: nilai deal = total dokumen ini, termin disusun, DP
+ * ditagih. Serah terima ke admin office baru terjadi saat DP ditandai lunas.
  *
- * Dulu keduanya langsung deal. Price list yang disetujui ikut menyusun
- * termin dan menyerahkan klien ke admin office, sebelum ada spesifikasi
- * maupun penawaran sungguhan.
+ * Klien yang sudah DP/deal (misalnya menyetujui tambahan): nilai kontraknya
+ * diperbarui dan termin yang belum dibayar disesuaikan.
  */
 function quoteCocok(int $quoteId, ?int $userId = null): array
 {
@@ -265,44 +365,34 @@ function quoteCocok(int $quoteId, ?int $userId = null): array
                FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$quoteId]);
     if (!$qq) throw new RuntimeException('Penawaran tidak ditemukan.');
     $cid = (int) $qq['client_id'];
+    $jenis = $qq['jenis'] === 'pricelist' ? 'Price list' : 'Penawaran';
 
-    if ($qq['jenis'] === 'penawaran' && (float) $qq['total'] <= 0) {
-        throw new RuntimeException('Total penawaran ini masih Rp 0. Isi harganya dulu sebelum ditandai deal.');
+    if ((float) $qq['total'] <= 0) {
+        throw new RuntimeException('Totalnya masih Rp 0 — isi harga paket dulu, karena DP 30% dihitung dari angka ini.');
     }
     if ($qq['stage'] === 'batal') {
-        throw new RuntimeException('Klien ini tercatat tidak jadi. Aktifkan lagi dari halaman klien sebelum menandai setuju.');
+        throw new RuntimeException('Klien ini tercatat tidak jadi. Aktifkan lagi dari halaman klien sebelum menandai cocok.');
     }
 
     q("UPDATE quotes SET status = 'cocok', decided_at = NOW(), sent_at = COALESCE(sent_at, NOW())
        WHERE id = ?", [$quoteId]);
-
-    if ($qq['jenis'] === 'pricelist') {
-        q("UPDATE clients SET pl_sent_at = COALESCE(pl_sent_at, NOW()) WHERE id = ?", [$cid]);
-        $r = clientMajuKe($cid, 'spesifikasi', $userId, 'Price list ' . $qq['nomor'] . ' cocok.');
-        if (!$r['changed']) clientLog($cid, 'catatan', 'Price list ' . $qq['nomor'] . ' cocok', '', $userId);
-        return ['tahap' => 'spesifikasi', 'info' => $r['info']];
-    }
-
-    // Penawaran lain yang masih terbuka tidak lagi berlaku — yang dipegang
-    // klien sekarang adalah yang disetujui ini.
+    // Dokumen lain yang masih terbuka tidak lagi berlaku.
     q("UPDATE quotes SET status = 'revisi'
-       WHERE client_id = ? AND id <> ? AND jenis = 'penawaran' AND status IN ('draf','terkirim')",
-      [$cid, $quoteId]);
+       WHERE client_id = ? AND id <> ? AND status IN ('draf','terkirim')", [$cid, $quoteId]);
+    q("UPDATE clients SET deal_value = ? WHERE id = ?", [$qq['total'], $cid]);
 
-    q("UPDATE clients SET deal_value = ?, penawaran_sent_at = COALESCE(penawaran_sent_at, NOW())
-       WHERE id = ?", [$qq['total'], $cid]);
-    $r = stageSudahDeal($qq['stage'])
-       ? ['changed' => false, 'info' => []]
-       : clientSetStage($cid, 'deal', $userId, 'Penawaran ' . $qq['nomor'] . ' disetujui klien.');
-
-    // Klien yang sudah deal sebelumnya (misalnya tambahan paket): nilai
-    // kontraknya berubah, termin yang belum ada disusun.
-    if (!$r['changed']) {
-        $n = terminSusun($cid);
-        if ($n) $r['info'][] = "Termin pembayaran disusun dari template ($n termin).";
-        clientLog($cid, 'catatan', 'Penawaran ' . $qq['nomor'] . ' disetujui', rupiah((float) $qq['total']), $userId);
+    if (!stageSudahDeal($qq['stage']) && $qq['stage'] !== 'dp') {
+        $r = clientMajuKe($cid, 'dp', $userId, $jenis . ' ' . $qq['nomor'] . ' cocok.');
+        if (!$r['changed']) $r = clientSetStage($cid, 'dp', $userId, $jenis . ' ' . $qq['nomor'] . ' cocok.');
+        return ['tahap' => 'dp', 'info' => $r['info']];
     }
-    return ['tahap' => 'deal', 'info' => $r['info']];
+
+    // Sudah di Menunggu DP / sudah deal: angka kontrak berubah.
+    $n = terminSusun($cid) ?: terminSesuaikan($cid);
+    clientLog($cid, 'catatan', $jenis . ' ' . $qq['nomor'] . ' disetujui', 'Nilai kontrak ' . rupiah((float) $qq['total'])
+              . ($n ? " · $n termin disesuaikan" : ''), $userId);
+    $info = $n ? ["Nilai kontrak jadi " . rupiah((float) $qq['total']) . "; $n termin yang belum dibayar disesuaikan."] : [];
+    return ['tahap' => $qq['stage'], 'info' => $info];
 }
 
 /**

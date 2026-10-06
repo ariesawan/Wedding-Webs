@@ -216,57 +216,78 @@ Setiap klien punya satu tahap dan satu tindakan berikutnya yang bertanggal.
 Kalau tanggal itu lewat, klien muncul di **Hari ini** pada Ringkasan.
 
 ```
-Prospek baru → Price list → Spesifikasi → Penawaran → Deal → Persiapan → Hari-H → Selesai
-      └──────────────── Tidak jadi (alasan wajib, dicatat di Analisa) ────────────────┘
+Prospek baru → Price list terkirim → Menunggu DP → Deal · penyusunan → Persiapan → Hari-H → Selesai
+      └────────────── Tidak jadi (alasan wajib, dicatat di Analisa) ──────────────┘
+         admin early  ─────────────────────────────┘└── admin office ──────────────────
 ```
 
 Halaman klien dibuka dengan kartu **Langkah sekarang** — isinya mengikuti tahap,
-lengkap dengan tombol yang dibutuhkan. Sisanya ada di tab: Ikhtisar, Kebutuhan,
-Penawaran, Data lengkap, Vendor, Pembayaran, Data klien.
+lengkap dengan tombol yang dibutuhkan. Sisanya ada di tab: Ikhtisar, Biodata awal,
+Price list, Biodata lengkap (keluarga, adat), Acara & dekor, Vendor, Pembayaran.
 
 ### Peran
 
 | Peran | Bagian |
 |---|---|
-| Admin early | Prospek baru sampai deal: price list, konsultasi, penawaran, nego |
-| Admin office | Setelah deal: data lengkap, vendor, persiapan, termin |
+| Admin early | Prospek: biodata awal, kirim price list (PDF lewat WhatsApp), tanggapan klien, tagih & konfirmasi DP 30%. Juga mengurus **Paket & price list** dan **Formulir masuk** |
+| Admin office | Setelah DP: biodata lengkap & keluarga, venue, konsep dekor, vendor, termin pembayaran, meeting, persiapan |
 | Owner | Semuanya |
+
+### Paket & price list
+
+Menu **Paket & price list** berisi paket berbentuk *paket + rincian isi*: satu
+harga paket, isi dikelompokkan (Wedding Organizer, Rias & busana, Dekorasi, …),
+dan tambahan opsional berharga sendiri. Paket bertanda **Tampil di situs**
+muncul di `https://callalily.party/pricelist`; selama harganya kosong, situs
+menulis "harga dikirim lewat WhatsApp". Paket internal (mis. *Template kosong*)
+hanya dipakai untuk menyusun price list khusus.
+
+Price list dikirim sebagai **PDF**. Dengan gateway WhatsApp (Fonnte) di
+Pengaturan, tombol **Kirim PDF lewat WhatsApp** melampirkan berkasnya langsung;
+tanpa gateway, unduh PDF-nya atau buka WhatsApp klien dengan teks siap kirim,
+lalu tekan **Sudah saya kirim manual**. Isi rekening dan nomor WA admin di
+Pengaturan → *Price list & pembayaran* supaya ikut tercetak.
 
 ### Yang berjalan otomatis
 
 | Kejadian | Akibatnya |
 |---|---|
-| Klien baru dicatat / masuk lewat formulir | Tindakan "Kirim price list", tenggat H+1 |
-| Price list ditandai terkirim | Tahap → **Price list** |
-| Price list **cocok** | Tahap → **Spesifikasi** (belum deal) |
-| Konsultasi dijadwalkan | Prospek baru / price list → **Spesifikasi** |
-| Hasil konsultasi **Lanjut** | Tindakan "Susun dan kirim penawaran", tenggat H+3 |
-| Penawaran ditandai terkirim | Tahap → **Penawaran** |
+| Klien masuk lewat formulir / dicatat di panel | Tindakan "Kirim price list" bertanggal hari ini; paket yang dipilih klien tercatat sebagai *paket diminati* |
+| Price list ditandai terkirim | Tahap → **Price list terkirim** |
 | Klien menawar | Angka & alasannya dicatat, lalu **Buat revisi** |
-| Penawaran **disetujui** | **Deal**: nilai deal = total penawaran, termin dari *template pembayaran*, event dibuat, klien pindah ke admin office |
-| Price list / penawaran **tidak cocok** | Tahap → **Tidak jadi**, langsung diarahkan ke Analisa |
+| Price list **cocok** | Tahap → **Menunggu DP**: nilai deal = total price list, termin disusun dari *template pembayaran*, DP 30% ditagih |
+| **DP masuk** (tombol Konfirmasi DP, atau tandai lunas termin DP) | Tahap → **Deal · penyusunan**, event dibuat, klien pindah ke **admin office** |
+| Price list **tidak cocok** | Tahap → **Tidak jadi**, langsung diarahkan ke Analisa |
+| Klien "tidak jadi" mengisi formulir lagi | Aktif kembali sebagai Prospek baru |
 | Mulai persiapan | Checklist 17 langkah H-90 sampai H+3 |
 | H-7 (deal atau persiapan) | Tahap → **Hari-H** (cron) |
 | Acara lewat | Tahap → **Selesai** (cron) |
 
-Perpindahan otomatis hanya **maju**: mengirim price list tambahan ke klien yang
-sudah deal tidak menyeretnya mundur.
+Menjadwalkan konsultasi/meeting **tidak** memindahkan tahap. Perpindahan
+otomatis hanya **maju**: mengirim price list tambahan ke klien yang sudah deal
+tidak menyeretnya mundur.
 
-Termin pembayaran disusun dari tabel `payment_templates` — sama persis dengan
-yang tercantum di teks penawaran yang dikirim ke klien.
+### Formulir publik
 
-### Tautan penawaran untuk klien
+`/form` (dan `form.callalily.party`) hanya menanyakan biodata awal + paket.
+**Setiap kiriman tercatat** di menu **Formulir masuk** — termasuk yang ditolak
+penjagaan anti-bot, gagal validasi, atau galat database. Yang belum jadi klien
+muncul di Ringkasan sebagai "Kiriman formulir belum jadi klien" dan bisa
+dijadikan klien dengan satu tombol. Nomor WA dicocokkan dari 9 digit terakhir,
+jadi kiriman ulang tidak membuat klien kembar.
 
-Teks WhatsApp penawaran memuat tautan `…/penawaran.php?t=…`. Halaman itu
-hanya-baca, tidak diindeks, dan mencatat kapan klien pertama kali membukanya
-(terlihat di kartu Langkah sekarang: "sudah dibuka klien").
+### Tautan price list untuk klien
+
+Teks WhatsApp memuat tautan `…/penawaran.php?t=…` (rincian di HP) dan
+`…&pdf=1` (berkas PDF). Halaman itu hanya-baca, tidak diindeks, dan mencatat
+kapan klien pertama kali membukanya.
 
 ### Struktur database
 
-Mulai v22, kolom yang dibutuhkan kode ditambahkan sendiri saat halaman
-pertama dibuka setelah unggah (`inc/skema.php`). Kalau hosting menolak,
-panel owner menampilkan peringatan kuning — jalankan `db/migration-v22.sql`
-lewat phpMyAdmin.
+Kolom dan tabel yang dibutuhkan kode ditambahkan sendiri saat halaman pertama
+dibuka setelah unggah (`inc/skema.php`). Kalau hosting menolak, panel owner
+menampilkan peringatan kuning — jalankan `db/migration-v23.sql` lewat
+phpMyAdmin.
 
 ---
 

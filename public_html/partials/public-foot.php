@@ -4,6 +4,7 @@
   <span><?= e(strtoupper(setting('site_name', 'Callalily Party'))) ?> WEDDING ORGANIZER · <?= e(setting('address_city', 'Yogyakarta')) ?></span>
   <span>
     <a href="<?= url() ?>">Beranda</a> ·
+    <a href="<?= url('pricelist') ?>">Price list</a> ·
     <a href="<?= url('galeri') ?>">Galeri</a> ·
     <a href="<?= url('blog') ?>">Jurnal</a> ·
     <a href="<?= url('feed.php') ?>">RSS</a>

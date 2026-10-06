@@ -1,336 +1,108 @@
 <?php
 /**
- * FORMULIR KLIEN PUBLIK — form.callalily.party
+ * FORMULIR KLIEN PUBLIK — form.callalily.party  (juga /form)
  *
- * Satu-satunya halaman di situs ini yang boleh menulis ke tabel clients
- * tanpa login. Karena itu penjagaannya berlapis, dan tiap lapisnya menutup
- * celah yang berbeda:
+ * Isinya sengaja hanya BIODATA AWAL + paket yang diminati: cukup bagi admin
+ * early untuk mengirim price list. Biodata lengkap, keluarga, susunan acara,
+ * dekor, dan venue diisi bersama admin office setelah DP — menanyakan
+ * semuanya di depan hanya membuat orang berhenti di tengah formulir.
  *
- *   1. Honeypot        — menangkap bot yang mengisi semua kolom
- *   2. Jeda minimum    — menangkap bot yang mengirim dalam sekejap
- *   3. Throttle per IP — menahan banjir kiriman dari satu sumber
- *   4. Token sesi      — menahan kiriman dari luar halaman ini
- *   5. Validasi ketat  — hanya kolom yang dikenal yang masuk database
+ * Penjagaan dari kiriman otomatis:
+ *   1. Honeypot    — kolom tak terlihat bernama netral (bukan "website":
+ *                    pengisi otomatis peramban kadang mengisinya)
+ *   2. Token HMAC  — membuktikan halaman dimuat dari situs ini, tanpa sesi
+ *   3. Jeda 3 detik
+ *   4. Throttle    — 10 kiriman tersimpan per IP per jam
  *
- * CAPTCHA sengaja tidak dipakai. Untuk formulir yang mungkin diisi lima
- * kali sehari, biayanya lebih besar daripada manfaatnya: satu permintaan
- * ke server pihak ketiga, dan satu rintangan lagi buat calon klien yang
- * sedang berniat menghubungi. Empat lapis di atas sudah menghentikan
- * hampir semua kiriman otomatis.
+ * Dan yang paling penting: SEMUA kiriman — termasuk yang ditolak salah satu
+ * penjagaan di atas — tercatat di Formulir masuk lengkap dengan isinya.
+ * Lihat inc/formulir.php.
  */
 require_once __DIR__ . '/inc/bootstrap.php';
-require_once __DIR__ . '/inc/pipeline.php';
-require_once __DIR__ . '/partials/blok-top5.php';
+require_once __DIR__ . '/inc/formulir.php';
 
-/**
- * Aset (CSS, font, gambar) SELALU ditarik dari domain induk, bukan dari
- * subdomain. url() memakai BASE_URL yang menunjuk ke callalily.party, jadi
- * ini terjadi sendirinya — dan memang yang diinginkan: satu salinan CSS,
- * satu cache peramban, dan tidak perlu sertifikat aset terpisah.
- *
- * Yang perlu dijaga adalah tautan BALIK ke situs induk supaya tidak
- * menunjuk ke subdomain. Karena semuanya memakai url(), itu pun otomatis.
- */
+$waNo = waNomorPublik();
+
 if (setting('form_aktif', '1') !== '1') {
     http_response_code(503);
-    exit('Formulir sedang ditutup sementara.');
+    exit('Formulir sedang ditutup sementara. Hubungi kami lewat WhatsApp: https://wa.me/' . $waNo);
 }
 
-if (session_status() !== PHP_SESSION_ACTIVE) session_start();
-if (empty($_SESSION['form_mulai'])) $_SESSION['form_mulai'] = time();
-if (empty($_SESSION['form_nonce'])) $_SESSION['form_nonce'] = bin2hex(random_bytes(16));
-
-$galat = [];
+$galat  = [];
 $sukses = false;
-$isi = [];
+$isi    = formIsi($_GET);          // ?paket=semanak&brief=… dari price list / penyusun
+$isi['wa'] = '';
 
-/* ============================================================
-   PENJAGAAN
-   ============================================================ */
-function ipPengirim(): string
-{
-    // Header proxy TIDAK dipercaya. Siapa pun bisa memalsukan
-    // X-Forwarded-For, dan throttle yang bisa dilewati dengan satu header
-    // sama saja dengan tidak ada throttle.
-    return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
-}
-
-function bolehKirim(string $ip): bool
-{
-    try {
-        q("DELETE FROM form_throttle WHERE terakhir < DATE_SUB(NOW(), INTERVAL 1 DAY)");
-        $r = one("SELECT jumlah FROM form_throttle
-                  WHERE ip = ? AND terakhir > DATE_SUB(NOW(), INTERVAL 1 HOUR)", [$ip]);
-        return !$r || (int) $r['jumlah'] < 5;
-    } catch (Throwable $e) {
-        return true;   // tabel belum ada — jangan halangi calon klien
-    }
-}
-
-function catatKirim(string $ip): void
-{
-    try {
-        q("INSERT INTO form_throttle (ip, jumlah) VALUES (?, 1)
-           ON DUPLICATE KEY UPDATE
-             jumlah = IF(terakhir < DATE_SUB(NOW(), INTERVAL 1 HOUR), 1, jumlah + 1)", [$ip]);
-    } catch (Throwable $e) { /* pencatatan gagal bukan alasan menolak */ }
-}
-
-/* ============================================================
-   PROSES
-   ============================================================ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $ip = ipPengirim();
+    $ip  = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';   // header proxy tidak dipercaya
+    $isi = formIsi($_POST);
+    $tok = formTokenCek((string) ($_POST['_t'] ?? ''));
 
-    // Honeypot: kolom tersembunyi yang manusia tidak pernah lihat.
-    // Diberi nama yang menggoda bot ('website'), bukan 'honeypot'.
-    if (trim($_POST['website'] ?? '') !== '') {
-        $sukses = true;   // bot dibiarkan mengira berhasil — tidak diberi umpan balik
-    } elseif (!hash_equals($_SESSION['form_nonce'] ?? '', $_POST['_n'] ?? '')) {
-        $galat[] = 'Halaman kedaluwarsa. Muat ulang lalu isi lagi.';
-    } elseif (time() - (int) ($_SESSION['form_mulai'] ?? 0) < 4) {
-        // Manusia tidak bisa mengisi tujuh kolom dalam empat detik.
-        $galat[] = 'Terlalu cepat. Coba kirim sekali lagi.';
-    } elseif (!bolehKirim($ip)) {
-        $galat[] = 'Sudah beberapa kali mengirim dari perangkat ini. Coba lagi satu jam lagi, '
+    if (trim((string) ($_POST['kd_7'] ?? '')) !== '') {
+        // Bot dibiarkan mengira berhasil. Isinya tetap tercatat (status bot)
+        // supaya kalau ternyata manusia, datanya tidak hilang.
+        formLog('bot', $isi, $ip, 'Kolom jebakan terisi');
+        $sukses = true;
+    } elseif ($tok === 'palsu') {
+        formLog('ditolak', $isi, $ip, 'Token halaman tidak sah');
+        $galat[] = 'Halaman perlu dimuat ulang. Isian kalian masih ada — tekan Kirim sekali lagi.';
+    } elseif ($tok === 'cepat') {
+        formLog('ditolak', $isi, $ip, 'Dikirim kurang dari 3 detik');
+        $galat[] = 'Terlalu cepat. Tekan Kirim sekali lagi.';
+    } elseif (!formBolehKirim($ip)) {
+        formLog('ditolak', $isi, $ip, 'Batas 10 kiriman per jam');
+        $galat[] = 'Sudah beberapa kali mengirim dari perangkat ini. Data kalian tetap kami catat — '
                  . 'atau hubungi kami langsung lewat WhatsApp.';
+    } elseif ($v = formValidasi($isi)) {
+        formLog('ditolak', $isi, $ip, 'Validasi: ' . implode(' ', $v));
+        $galat = $v;
     } else {
-        $isi = [
-            'pria'    => mb_substr(trim($_POST['pria'] ?? ''), 0, 120),
-            'wanita'  => mb_substr(trim($_POST['wanita'] ?? ''), 0, 120),
-            'wa'      => preg_replace('/\D/', '', $_POST['wa'] ?? ''),
-            'email'   => mb_substr(trim($_POST['email'] ?? ''), 0, 160),
-            'tanggal' => trim($_POST['tanggal'] ?? ''),
-            'tamu'    => (int) preg_replace('/\D/', '', $_POST['tamu'] ?? '0'),
-            'tamu_akad' => (int) preg_replace('/\D/', '', $_POST['tamu_akad'] ?? '0'),
-            'tamu_res'  => (int) preg_replace('/\D/', '', $_POST['tamu_resepsi'] ?? '0'),
-            'kota'    => mb_substr(trim($_POST['kota'] ?? ''), 0, 90),
-            'venue'   => mb_substr(trim($_POST['venue'] ?? ''), 0, 190),
-            'budget'  => (int) preg_replace('/\D/', '', $_POST['budget'] ?? '0'),
-            'sumber'  => trim($_POST['sumber'] ?? ''),
-            'catatan' => mb_substr(trim($_POST['catatan'] ?? ''), 0, 2000),
-            'brief'   => mb_substr(trim($_POST['brief'] ?? ''), 0, 4000),
-            // Base information
-            'akad_t'  => trim($_POST['akad_tanggal'] ?? ''),
-            'akad_j'  => trim($_POST['akad_jam'] ?? ''),
-            'akad_l'  => mb_substr(trim($_POST['akad_lokasi'] ?? ''), 0, 190),
-            'res_t'   => trim($_POST['resepsi_tanggal'] ?? ''),
-            'res_j'   => trim($_POST['resepsi_jam'] ?? ''),
-            'res_l'   => mb_substr(trim($_POST['resepsi_lokasi'] ?? ''), 0, 190),
-            'adat'    => mb_substr(trim($_POST['prosesi_adat'] ?? ''), 0, 40),
-            'adat_l'  => mb_substr(trim($_POST['prosesi_adat_lainnya'] ?? ''), 0, 120),
-            'venue_t' => (array) ($_POST['venue_tipe'] ?? []),
-            'jenis_a' => trim($_POST['jenis_acara'] ?? ''),
-            'sitting' => trim($_POST['sitting_mode'] ?? ''),
-            'tipe'    => trim($_POST['tipe_klien'] ?? ''),
-            'needs'   => array_map('intval', (array) ($_POST['vendor_need'] ?? [])),
-            'top5'    => (array) ($_POST['top_vendor'] ?? []),
-        ];
-
-        // Hari-H diturunkan dari resepsi, lalu akad. Sama persis dengan
-        // aturan di panel — kalau berbeda, klien yang masuk lewat formulir
-        // akan punya tanggal yang tidak cocok dengan yang dicatat manual.
-        if ($isi['tanggal'] === '') {
-            $isi['tanggal'] = $isi['res_t'] ?: $isi['akad_t'];
-        }
-        if ($isi['venue'] === '') {
-            $isi['venue'] = $isi['res_l'] ?: $isi['akad_l'];
-        }
-        // Jamnya juga. Sebelumnya tidak pernah diturunkan sama sekali, jadi
-        // klien yang mengisi jam resepsi tetap muncul tanpa jam di panel —
-        // dan kartu Hari-H terdekat serta undangan kalender ikut kosong.
-        $isi['jam'] = $isi['res_j'] ?: $isi['akad_j'];
-
-        // guest_estimate tetap jadi angka utama untuk penawaran, daftar klien,
-        // dan analisa. Diturunkan dari tamu resepsi lalu tamu akad — aturan
-        // yang sama dengan tanggal dan venue, supaya klien dari formulir tidak
-        // punya angka yang berbeda dengan yang dicatat manual di panel.
-        if ($isi['tamu'] === 0) {
-            $isi['tamu'] = $isi['tamu_res'] ?: $isi['tamu_akad'];
-        }
-
-        if ($isi['pria'] === '' && $isi['wanita'] === '') $galat[] = 'Nama mempelai belum diisi.';
-        if (strlen($isi['wa']) < 9)                       $galat[] = 'Nomor WhatsApp belum benar.';
-        if ($isi['email'] !== '' && !filter_var($isi['email'], FILTER_VALIDATE_EMAIL)) {
-            $galat[] = 'Alamat email tidak valid.';
-        }
-        if ($isi['tanggal'] !== '' && !strtotime($isi['tanggal'])) $galat[] = 'Tanggal tidak terbaca.';
-
-        if (!$galat) {
-            try {
-                $wa = $isi['wa'];
-                if (str_starts_with($wa, '0'))  $wa = '62' . substr($wa, 1);
-                if (str_starts_with($wa, '8'))  $wa = '62' . $wa;
-
-                // Nomor yang sama tidak dibuat dua kali. Calon klien sering
-                // mengirim ulang karena ragu kirimannya masuk — dan dua baris
-                // klien untuk satu pasangan lebih merepotkan daripada satu
-                // kiriman yang hilang.
-                $ada = one("SELECT id FROM clients WHERE phone = ? LIMIT 1", [$wa]);
-
-                $sumberSah = in_array($isi['sumber'],
-                    ['instagram','whatsapp','web','referral','vendor','walkin','lainnya'], true)
-                    ? $isi['sumber'] : 'web';
-
-                $catatan = $isi['catatan'];
-                if ($isi['brief'] !== '') {
-                    $catatan = trim($catatan . "\n\n--- Susunan hari dari penyusun ---\n" . $isi['brief']);
-                }
-
-                if ($ada) {
-                    q("UPDATE clients SET
-                         name = COALESCE(NULLIF(?,''), name),
-                         partner_name = COALESCE(NULLIF(?,''), partner_name),
-                         email = COALESCE(NULLIF(?,''), email),
-                         wedding_date = COALESCE(?, wedding_date),
-                         -- Sama aturannya dengan wedding_date di atas: nilai baru
-                         -- menang kalau dikirim, nilai lama bertahan kalau kosong.
-                         -- COALESCE(wedding_time, ?) akan SALAH di sini — itu
-                         -- hanya mengisi saat masih kosong, jadi resepsi yang
-                         -- dipindah jamnya tidak pernah ikut terbarui.
-                         wedding_time = COALESCE(?, wedding_time),
-                         guest_estimate = IF(? > 0, ?, guest_estimate),
-                         city = COALESCE(NULLIF(?,''), city),
-                         venue = COALESCE(NULLIF(?,''), venue),
-                         budget_estimate = IF(? > 0, ?, budget_estimate),
-                         notes = CONCAT(COALESCE(notes,''), '\n\n[kiriman ulang formulir] ', ?),
-                         form_brief = ?, updated_at = NOW()
-                       WHERE id = ?",
-                      [$isi['pria'], $isi['wanita'], $isi['email'],
-                       $isi['tanggal'] ?: null, $isi['jam'] ?: null,
-                       $isi['tamu'], $isi['tamu'],
-                       $isi['kota'], $isi['venue'],
-                       $isi['budget'], $isi['budget'],
-                       $catatan, $isi['brief'], $ada['id']]);
-                    $id = (int) $ada['id'];
-                } else {
-                    q("INSERT INTO clients
-                        (name, partner_name, phone, email, wedding_date, wedding_time,
-                         guest_estimate, city, venue, budget_estimate, source, notes,
-                         stage, dari_form, form_ip, form_brief, created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'baru', 1, ?, ?, NOW())",
-                      [$isi['pria'] ?: $isi['wanita'], $isi['wanita'], $wa, $isi['email'],
-                       $isi['tanggal'] ?: null, $isi['jam'] ?: null,
-                       $isi['tamu'] ?: null,
-                       $isi['kota'], $isi['venue'], $isi['budget'] ?: null,
-                       $sumberSah, $catatan, $ip, $isi['brief']]);
-                    $id = insertId();
-                }
-
-                // ---- Base information ----
-                $venueSet = array_values(array_intersect(
-                    array_keys($isi['venue_t']), ['indoor', 'outdoor']));
-                $jenisA = in_array($isi['jenis_a'], ['standing','sitting'], true) ? $isi['jenis_a'] : '';
-                $sitMode = $jenisA === 'sitting'
-                    && in_array($isi['sitting'], ['per_seat','per_block'], true) ? $isi['sitting'] : '';
-
-                q("INSERT INTO client_wedding_info
-                    (client_id, akad_tanggal, akad_jam, akad_lokasi,
-                     resepsi_tanggal, resepsi_jam, resepsi_lokasi,
-                     prosesi_adat, prosesi_adat_lainnya, venue_tipe, jenis_acara, sitting_mode,
-                     tamu_akad, tamu_resepsi)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON DUPLICATE KEY UPDATE
-                     -- Kolom yang dikirim KOSONG tidak menimpa nilai lama.
-                     --
-                     -- Sebelumnya semuanya VALUES(...) polos, jadi kiriman ulang
-                     -- yang seadanya menghapus akad, resepsi, adat, dan jenis
-                     -- acara yang sudah tersimpan. Dan mengirim ulang itu
-                     -- perilaku paling wajar: calon klien ragu kirimannya masuk,
-                     -- lalu mengisi cepat-cepat seperlunya. Panel lalu
-                     -- memperlihatkan data yang lebih miskin daripada yang
-                     -- sebenarnya pernah dikirim — tanpa jejak apa pun.
-                     --
-                     -- Tanggal dan jam bertipe NULL kalau kosong, teks bertipe
-                     -- string kosong, jadi penjagaannya beda: COALESCE untuk
-                     -- yang pertama, NULLIF untuk yang kedua.
-                     akad_tanggal    = COALESCE(VALUES(akad_tanggal), akad_tanggal),
-                     akad_jam        = COALESCE(VALUES(akad_jam), akad_jam),
-                     akad_lokasi     = COALESCE(NULLIF(VALUES(akad_lokasi),''), akad_lokasi),
-                     resepsi_tanggal = COALESCE(VALUES(resepsi_tanggal), resepsi_tanggal),
-                     resepsi_jam     = COALESCE(VALUES(resepsi_jam), resepsi_jam),
-                     resepsi_lokasi  = COALESCE(NULLIF(VALUES(resepsi_lokasi),''), resepsi_lokasi),
-                     prosesi_adat    = COALESCE(NULLIF(VALUES(prosesi_adat),''), prosesi_adat),
-                     prosesi_adat_lainnya = COALESCE(NULLIF(VALUES(prosesi_adat_lainnya),''), prosesi_adat_lainnya),
-                     venue_tipe      = COALESCE(NULLIF(VALUES(venue_tipe),''), venue_tipe),
-                     jenis_acara     = COALESCE(NULLIF(VALUES(jenis_acara),''), jenis_acara),
-                     sitting_mode    = COALESCE(NULLIF(VALUES(sitting_mode),''), sitting_mode),
-                     tamu_akad       = COALESCE(VALUES(tamu_akad), tamu_akad),
-                     tamu_resepsi    = COALESCE(VALUES(tamu_resepsi), tamu_resepsi)",
-                  [$id,
-                   $isi['akad_t'] ?: null, $isi['akad_j'] ?: null, $isi['akad_l'],
-                   $isi['res_t']  ?: null, $isi['res_j']  ?: null, $isi['res_l'],
-                   $isi['adat'], $isi['adat_l'],
-                   $venueSet ? implode(',', $venueSet) : null, $jenisA, $sitMode,
-                   $isi['tamu_akad'] ?: null, $isi['tamu_res'] ?: null]);
-
-                if (in_array($isi['tipe'], ['tematis','budgeting'], true)) {
-                    q("UPDATE clients SET tipe_klien = ? WHERE id = ?", [$isi['tipe'], $id]);
-                }
-
-                // ---- Kebutuhan vendor ----
-                if ($isi['needs']) {
-                    q("DELETE FROM client_vendor_needs WHERE client_id = ?", [$id]);
-                    $urut = 0;
-                    foreach ($isi['needs'] as $catId) {
-                        if ($catId <= 0) continue;
-                        q("INSERT IGNORE INTO client_vendor_needs (client_id, category_id, sort_order)
-                           VALUES (?,?,?)", [$id, $catId, $urut++ * 10]);
-                    }
-                }
-
-                // ---- Top 5 prioritas ----
-                if ($isi['top5']) {
-                    q("DELETE FROM client_top_vendors WHERE client_id = ?", [$id]);
-                    $sudah = [];
-                    foreach ($isi['top5'] as $urutan => $catId) {
-                        $urutan = (int) $urutan; $catId = (int) $catId;
-                        if ($urutan < 1 || $urutan > 5 || $catId <= 0) continue;
-                        if (in_array($catId, $sudah, true)) continue;
-                        $sudah[] = $catId;
-                        q("INSERT INTO client_top_vendors (client_id, category_id, urutan, nama)
-                           VALUES (?,?,?,'')", [$id, $catId, $urutan]);
-                    }
-                }
-
-                // Tindak lanjut langsung terjadwal. Prospek yang masuk sendiri
-                // lewat formulir adalah yang paling panas — menunggunya sampai
-                // ada yang sempat membuka panel adalah cara tercepat kehilangannya.
-                q("UPDATE clients SET next_action = ?, next_action_at = CURDATE()
-                   WHERE id = ? AND (next_action IS NULL OR next_action = '')",
-                  ['Balas kiriman formulir dan kirim price list', $id]);
-
-                if (function_exists('clientLog')) {
-                    clientLog($id, 'catatan', 'Masuk lewat formulir publik',
-                              'Diisi sendiri dari ' . e($_SERVER['HTTP_HOST'] ?? 'form'), null);
-                }
-                try { require_once __DIR__ . '/inc/chat.php'; chatSinkronKlien($id); }
-                catch (Throwable $e) { /* room chat menyusul */ }
-
-                catatKirim($ip);
-                $_SESSION['form_nonce'] = bin2hex(random_bytes(16));
-                $sukses = true;
-
-            } catch (Throwable $e) {
-                error_log('form.php: ' . $e->getMessage());
-                $galat[] = 'Terjadi gangguan saat menyimpan. Coba lagi, atau hubungi kami lewat WhatsApp.';
-            }
+        // Dicatat DULU sebagai galat, baru dinaikkan jadi tersimpan setelah
+        // klien terbentuk. Kalau proses mati di tengah jalan, jejaknya tetap
+        // ada dan muncul di dashboard sebagai "perlu dicek".
+        $logId = formLog('galat', $isi, $ip, 'Sedang diproses');
+        try {
+            $r = formSimpan($isi, $ip);
+            formLogSet($logId, $r['ulang'] ? 'ulang' : 'tersimpan', $r['id'], $r['info']);
+            formCatatKirim($ip);
+            formKabariAdmin($r['id'], $isi, $r['ulang']);
+            $sukses = true;
+        } catch (Throwable $e) {
+            error_log('form.php: ' . $e->getMessage());
+            formLogSet($logId, 'galat', null, mb_substr($e->getMessage(), 0, 380));
+            $galat[] = 'Ada gangguan saat menyimpan, tapi isian kalian sudah kami catat dan admin akan '
+                     . 'menghubungi. Kalau ingin lebih cepat, sapa kami di WhatsApp.';
         }
     }
 }
 
-$waNo = preg_replace('/\D/', '', (string) setting('wa_number'));
-if (str_starts_with($waNo, '0')) $waNo = '62' . substr($waNo, 1);
+$paketWeb = paketDaftar(true);
+$pilih    = formPaket($isi['paket']);
+$pilihId  = $pilih ? (int) $pilih['id'] : 0;
 
-seoHead([
-    'title'       => 'Isi Data Pernikahan — Callalily Party',
-    'description' => 'Isi tanggal, perkiraan tamu, dan rangkaian acara. Kami balas dengan rincian biaya '
-                   . 'dan ketersediaan tanggal dalam 2×24 jam.',
-    'canonical'   => setting('form_url', url('form')),
-    // Halaman formulir tidak perlu bersaing di pencarian — yang harus
-    // terindeks adalah beranda dan halaman kategori, bukan borang isian.
-    'robots'      => 'noindex, follow',
-]);
+$seo = [
+    'title'     => 'Isi Data Pernikahan — ' . setting('site_name', 'Callalily Party'),
+    'desc'      => 'Kirim nama, tanggal, perkiraan tamu, dan paket yang diminati. '
+                 . 'Kami balas dengan price list lengkap (PDF) lewat WhatsApp.',
+    'canonical' => setting('form_url', url('form')),
+    // Borang isian tidak perlu bersaing di pencarian.
+    'robots'    => 'noindex, follow',
+];
+$extraCss = <<<'CSS'
+<style>
+.fm-pk{display:grid;gap:10px;margin-bottom:6px}
+.fm-pk .fm-radio{display:flex;margin:0;align-items:flex-start}
+.fm-pk .fm-radio span{flex:1;display:block}
+.fm-pk .pk-h{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline}
+.fm-pk .pk-h b{font-family:var(--serif);font-style:italic;font-weight:400;font-size:20px}
+.fm-pk .pk-r{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--ember)}
+.fm-pk .pk-d{display:block;font-size:13px;color:var(--ivory-60);margin-top:3px}
+.fm-pk .pk-t{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ivory-38)}
+.fm-lihat{display:inline-block;font-size:13px;color:var(--ember);margin:4px 0 6px}
+.fm-brief{font-size:12.5px;color:var(--ivory-38);border-left:2px solid var(--ivory-12);padding:6px 0 6px 12px;
+  white-space:pre-wrap;margin:-4px 0 16px;max-height:9.5em;overflow:auto}
+</style>
+CSS;
 require __DIR__ . '/partials/public-head.php';
 ?>
 
@@ -340,253 +112,132 @@ require __DIR__ . '/partials/public-head.php';
   <div class="fm-ok">
     <span class="fm-ok-i">✓</span>
     <h1><?= te('Terkirim. Terima kasih.') ?></h1>
-    <p><?= te('Kami baca dulu susunannya, lalu balas dengan rincian biaya dan ketersediaan tanggal — biasanya dalam 2×24 jam.') ?></p>
-    <p class="fm-ok-n"><?= te('Kalau butuh lebih cepat, boleh langsung sapa kami di WhatsApp.') ?></p>
-    <?php if ($waNo): ?>
-      <a class="btn solid" href="https://wa.me/<?= e($waNo) ?>" target="_blank" rel="noopener">
-        <?= te('Buka WhatsApp') ?></a>
-    <?php endif; ?>
+    <p><?= te('Admin kami akan menyapa lewat WhatsApp dan mengirim price list lengkap dalam bentuk PDF — biasanya di hari yang sama.') ?></p>
+    <p class="fm-ok-n"><?= te('Kalau ingin lebih cepat, boleh langsung sapa kami.') ?></p>
+    <a class="btn solid" href="https://wa.me/<?= e($waNo) ?>?text=<?= rawurlencode('Halo Callalily, saya baru saja mengisi formulir atas nama ' . trim($isi['pria'] . ' & ' . $isi['wanita'], ' &') . '.') ?>"
+       target="_blank" rel="noopener"><?= te('Buka WhatsApp') ?></a>
     <a class="btn" href="<?= e(url()) ?>"><?= te('Kembali ke situs') ?></a>
   </div>
 
 <?php else: ?>
 
   <header class="fm-head">
-    <a class="fm-brand" href="<?= e(url()) ?>">Callalily<sup>PARTY</sup></a>
-    <h1><?= te('Ceritakan harimu') ?></h1>
-    <p><?= te('Tanggal dan perkiraan jumlah tamu sudah cukup untuk kami mulai. Sisanya boleh menyusul.') ?></p>
+    <h1><?= te('Ceritakan rencana kalian') ?></h1>
+    <p><?= te('Nama, nomor WhatsApp, dan perkiraan tanggal sudah cukup untuk kami kirimi price list. Sisanya boleh menyusul.') ?></p>
   </header>
 
   <?php if ($galat): ?>
-    <div class="fm-galat">
+    <div class="fm-galat" role="alert">
       <?php foreach ($galat as $g): ?><p><?= e($g) ?></p><?php endforeach; ?>
+      <p><a href="https://wa.me/<?= e($waNo) ?>" target="_blank" rel="noopener" style="color:inherit"><?= te('Atau hubungi kami di WhatsApp') ?> →</a></p>
     </div>
   <?php endif; ?>
 
   <form method="post" class="fm-form" novalidate>
-    <input type="hidden" name="_n" value="<?= e($_SESSION['form_nonce']) ?>">
-    <input type="hidden" name="brief" value="<?= e($_POST['brief'] ?? $_GET['brief'] ?? '') ?>">
-    <?php if (!empty($_GET['dari'])): ?>
-      <input type="hidden" name="dari" value="<?= e($_GET['dari']) ?>">
-    <?php endif; ?>
+    <input type="hidden" name="_t" value="<?= e(formToken()) ?>">
+    <input type="hidden" name="brief" value="<?= e($isi['brief']) ?>">
 
-    <!-- Honeypot. Disembunyikan lewat CSS, bukan type=hidden — sebagian bot
-         melewati input hidden tapi tetap mengisi input teks biasa. -->
+    <!-- Kolom jebakan: disembunyikan lewat CSS, namanya sengaja netral. -->
     <div class="fm-hp" aria-hidden="true">
-      <label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"></label>
+      <label>Kode<input type="text" name="kd_7" tabindex="-1" autocomplete="new-password"></label>
     </div>
 
     <fieldset>
-      <legend><?= te('Siapa') ?></legend>
+      <legend><?= te('Mempelai') ?></legend>
       <div class="fm-r2">
-        <label><?= te('Mempelai pria') ?>
-          <input type="text" name="pria" value="<?= e($isi['pria'] ?? '') ?>" autocomplete="off"></label>
-        <label><?= te('Mempelai wanita') ?>
-          <input type="text" name="wanita" value="<?= e($isi['wanita'] ?? '') ?>" autocomplete="off"></label>
+        <label><?= te('Nama mempelai pria') ?>
+          <input type="text" name="pria" value="<?= e($isi['pria']) ?>" autocomplete="off"></label>
+        <label><?= te('Nama mempelai wanita') ?>
+          <input type="text" name="wanita" value="<?= e($isi['wanita']) ?>" autocomplete="off"></label>
       </div>
       <div class="fm-r2">
         <label><?= te('WhatsApp') ?> <span class="fm-w">*</span>
-          <input type="tel" name="wa" required inputmode="numeric"
-                 value="<?= e($isi['wa'] ?? '') ?>" placeholder="0812…"></label>
+          <input type="tel" name="wa" required inputmode="tel" autocomplete="tel"
+                 value="<?= e($isi['wa']) ?>" placeholder="0812…"></label>
         <label><?= te('Email') ?>
-          <input type="email" name="email" value="<?= e($isi['email'] ?? '') ?>"></label>
+          <input type="email" name="email" autocomplete="email" value="<?= e($isi['email']) ?>"></label>
       </div>
+      <label><?= te('Instagram') ?>
+        <input type="text" name="ig" value="<?= e($isi['ig']) ?>" placeholder="@…" autocomplete="off"></label>
     </fieldset>
 
     <fieldset>
-      <legend><?= te('Acaranya') ?></legend>
+      <legend><?= te('Rencana acara') ?></legend>
       <div class="fm-r2">
-        <label><?= te('Tanggal') ?>
-          <input type="date" name="tanggal" value="<?= e($isi['tanggal'] ?? '') ?>"></label>
-        <label><?= te('Perkiraan tamu resepsi') ?>
-          <input type="number" name="tamu_resepsi" step="50" min="0"
-                 value="<?= e((string) ($isi['tamu_res'] ?? ($isi['tamu'] ?? ''))) ?>" placeholder="500"></label>
-      </div>
-      <div class="fm-r2">
-        <label><?= te('Perkiraan tamu akad / pemberkatan') ?>
-          <input type="number" name="tamu_akad" step="25" min="0"
-                 value="<?= e((string) ($isi['tamu_akad'] ?? '')) ?>" placeholder="100">
-          <span class="fm-ket" style="margin-top:5px;display:block"><?= te('Biasanya jauh lebih sedikit daripada resepsi. Boleh dikosongi kalau acaranya menyatu.') ?></span></label>
-        <div></div>
+        <label><?= te('Tanggal rencana') ?>
+          <input type="date" name="tanggal" value="<?= e($isi['tanggal']) ?>"></label>
+        <label><?= te('Perkiraan tamu') ?>
+          <input type="number" name="tamu" step="50" min="0" inputmode="numeric"
+                 value="<?= $isi['tamu'] ? (int) $isi['tamu'] : '' ?>" placeholder="400"></label>
       </div>
       <div class="fm-r2">
         <label><?= te('Kota') ?>
-          <input type="text" name="kota" value="<?= e($isi['kota'] ?? 'Yogyakarta') ?>"></label>
+          <input type="text" name="kota" value="<?= e($isi['kota'] !== '' ? $isi['kota'] : 'Yogyakarta') ?>"></label>
         <label><?= te('Venue, kalau sudah ada') ?>
-          <input type="text" name="venue" value="<?= e($isi['venue'] ?? '') ?>"></label>
+          <input type="text" name="venue" value="<?= e($isi['venue']) ?>"></label>
       </div>
-      <div class="fm-r2">
-        <label><?= te('Perkiraan budget') ?>
-          <input type="text" name="budget" inputmode="numeric"
-                 value="<?= e((string) ($isi['budget'] ?? '')) ?>" placeholder="Rp"></label>
-        <label><?= te('Tahu Callalily dari mana') ?>
-          <select name="sumber">
-            <?php foreach (['instagram'=>'Instagram','referral'=>'Rekomendasi teman',
-                            'vendor'=>'Vendor lain','web'=>'Google / situs',
-                            'walkin'=>'Datang langsung','lainnya'=>'Lainnya'] as $k => $v): ?>
-              <option value="<?= $k ?>" <?= ($isi['sumber'] ?? '') === $k ? 'selected' : '' ?>>
-                <?= te($v) ?></option>
-            <?php endforeach; ?>
-          </select></label>
-      </div>
-      <label><?= te('Yang ingin kalian ceritakan') ?>
-        <textarea name="catatan" rows="4"
-          placeholder="<?= te('Konsep yang dibayangkan, prosesi adat, kendala, atau apa pun yang perlu kami tahu.') ?>"><?= e($isi['catatan'] ?? '') ?></textarea></label>
-    </fieldset>
-
-    <?php
-    $katForm = [];
-    try {
-        $katForm = all("SELECT id, nama FROM vendor_categories
-                        WHERE parent_id IS NULL AND is_active = 1 ORDER BY urutan, nama");
-    } catch (Throwable $e) { $katForm = []; }
-    /**
-     * Centang awal berasal dari tiga sumber, berurutan kekuatannya:
-     *   1. kiriman POST sebelumnya  — kalau formulir gagal validasi dan
-     *      ditampilkan ulang, pilihan orang tidak boleh hilang
-     *   2. ?vendor= dari penyusun   — apa yang sudah dipilih di beranda
-     *   3. kosong
-     *
-     * Nomor 2 hanya keadaan AWAL, bukan kunci. Semua centang tetap bisa
-     * ditambah atau dilepas di sini — yang dibawa dari beranda sering baru
-     * gambaran kasar, dan memaksanya jadi keputusan akhir akan membuat orang
-     * mengisi ulang dari nol.
-     */
-    $needTerpilih = array_map('intval', (array) ($_POST['vendor_need'] ?? []));
-    if (!$needTerpilih && !empty($_GET['vendor'])) {
-        $needTerpilih = array_values(array_filter(
-            array_map('intval', explode(',', (string) $_GET['vendor'])),
-            fn($v) => $v > 0
-        ));
-    }
-
-    // Wedding Organizer selalu tercentang, dan hanya dia.
-    //
-    // Sebelumnya centang bawaan mengikuti apa pun yang dipilih di penyusun
-    // beranda — sering belasan kategori sekaligus. Itu mengubah arti
-    // kolomnya: yang mestinya "apa yang kalian butuhkan" jadi "apa yang
-    // tadi kamu klik-klik", dan admin menerima daftar kebutuhan yang tidak
-    // pernah benar-benar diputuskan siapa pun.
-    //
-    // WO beda: klien yang mengisi formulir wedding organizer memang sudah
-    // pasti membutuhkan wedding organizer. Sisanya biar dia yang memilih.
-    $idWO = (int) (one("SELECT id FROM vendor_categories WHERE slug = 'wedding-organizer' LIMIT 1")['id'] ?? 0);
-    if ($idWO && !in_array($idWO, $needTerpilih, true)) $needTerpilih[] = $idWO;
-    ?>
-
-    <fieldset>
-      <legend><?= te('Susunan acara') ?></legend>
-      <p class="fm-ket"><?= te('Boleh dilewati. Kalau sudah ada gambarannya, ini yang membuat penawaran kami jauh lebih tepat sejak awal.') ?></p>
-
-      <div class="fm-r2">
-        <label><?= te('Akad / pemberkatan — tanggal') ?>
-          <input type="date" name="akad_tanggal" value="<?= e($isi['akad_t'] ?? '') ?>"></label>
-        <label><?= te('Jam') ?>
-          <input type="time" name="akad_jam" value="<?= e($isi['akad_j'] ?? '') ?>"></label>
-      </div>
-      <label><?= te('Lokasi akad') ?>
-        <input type="text" name="akad_lokasi" value="<?= e($isi['akad_l'] ?? '') ?>"
-               placeholder="<?= te('Masjid, gereja, atau rumah') ?>"></label>
-
-      <div class="fm-r2">
-        <label><?= te('Resepsi — tanggal') ?>
-          <input type="date" name="resepsi_tanggal" value="<?= e($isi['res_t'] ?? '') ?>"></label>
-        <label><?= te('Jam') ?>
-          <input type="time" name="resepsi_jam" value="<?= e($isi['res_j'] ?? '') ?>"></label>
-      </div>
-      <label><?= te('Lokasi resepsi') ?>
-        <input type="text" name="resepsi_lokasi" value="<?= e($isi['res_l'] ?? '') ?>"></label>
-
-      <div class="fm-r2">
-        <label><?= te('Prosesi adat') ?>
-          <select name="prosesi_adat">
-            <option value=""><?= te('— tidak ada / belum ditentukan —') ?></option>
-            <?php foreach (['jawa'=>'Jawa','chinese'=>'Chinese','batak'=>'Batak','lainnya'=>'Suku lainnya'] as $k=>$v): ?>
-              <option value="<?= $k ?>" <?= ($isi['adat'] ?? '') === $k ? 'selected' : '' ?>><?= te($v) ?></option>
-            <?php endforeach; ?>
-          </select></label>
-        <label><?= te('Kalau suku lain, sebutkan') ?>
-          <input type="text" name="prosesi_adat_lainnya" value="<?= e($isi['adat_l'] ?? '') ?>"></label>
-      </div>
-
-      <div class="fm-r2">
-        <label><?= te('Venue') ?>
-          <span class="fm-cek">
-            <label><input type="checkbox" name="venue_tipe[indoor]" value="1"
-              <?= !empty($isi['venue_t']['indoor']) ? 'checked' : '' ?>> <?= te('Indoor') ?></label>
-            <label><input type="checkbox" name="venue_tipe[outdoor]" value="1"
-              <?= !empty($isi['venue_t']['outdoor']) ? 'checked' : '' ?>> <?= te('Outdoor') ?></label>
-          </span></label>
-        <label><?= te('Jenis acara') ?>
-          <select name="jenis_acara" id="fJenis">
-            <option value=""><?= te('— belum ditentukan —') ?></option>
-            <option value="standing" <?= ($isi['jenis_a'] ?? '') === 'standing' ? 'selected' : '' ?>><?= te('Standing party') ?></option>
-            <option value="sitting"  <?= ($isi['jenis_a'] ?? '') === 'sitting'  ? 'selected' : '' ?>><?= te('Sitting arrangement') ?></option>
-          </select></label>
-      </div>
-
-      <div id="fSit" <?= ($isi['jenis_a'] ?? '') === 'sitting' ? '' : 'hidden' ?>>
-        <span class="fm-cek">
-          <label><input type="radio" name="sitting_mode" value="per_seat"
-            <?= ($isi['sitting'] ?? '') === 'per_seat' ? 'checked' : '' ?>> <?= te('Per seat — ada nama tiap kursi') ?></label>
-          <label><input type="radio" name="sitting_mode" value="per_block"
-            <?= ($isi['sitting'] ?? '') === 'per_block' ? 'checked' : '' ?>> <?= te('Per block — piring terbang') ?></label>
-        </span>
-      </div>
+      <label><?= te('Perkiraan budget') ?>
+        <input type="text" name="budget" inputmode="numeric"
+               value="<?= $isi['budget'] ? e(number_format($isi['budget'], 0, ',', '.')) : '' ?>" placeholder="Rp"></label>
     </fieldset>
 
     <fieldset>
-      <legend><?= te('Cara menyusun anggaran') ?></legend>
-      <label class="fm-radio">
-        <input type="radio" name="tipe_klien" value="tematis"
-          <?= ($isi['tipe'] ?? 'tematis') !== 'budgeting' ? 'checked' : '' ?>>
-        <span><b><?= te('Ikuti konsep') ?></b><br>
-          <?= te('Kami susun sesuai yang kalian bayangkan. Budget jadi perkiraan, bukan batas.') ?></span>
-      </label>
-      <label class="fm-radio">
-        <input type="radio" name="tipe_klien" value="budgeting"
-          <?= ($isi['tipe'] ?? '') === 'budgeting' ? 'checked' : '' ?>>
-        <span><b><?= te('Ikuti anggaran') ?></b><br>
-          <?= te('Angka di atas jadi batas atas. Kami isi sampai plafon, lalu berhenti.') ?></span>
-      </label>
-    </fieldset>
-
-    <?php if ($katForm): ?>
-    <fieldset>
-      <legend><?= te('Vendor yang dibutuhkan') ?></legend>
-      <p class="fm-ket"><?= te('Wedding Organizer sudah tercentang. Sisanya centang sendiri sesuai yang kalian butuhkan — boleh dikoreksi lagi saat konsultasi.') ?></p>
-      <div class="fm-grid">
-        <?php foreach ($katForm as $k): ?>
-          <label class="fm-c">
-            <input type="checkbox" class="vn-cekf" name="vendor_need[]" value="<?= (int) $k['id'] ?>"
-              <?= in_array((int) $k['id'], $needTerpilih, true) ? 'checked' : '' ?>>
-            <?= e($k['nama']) ?>
+      <legend><?= te('Paket yang diminati') ?></legend>
+      <div class="fm-pk">
+        <?php foreach ($paketWeb as $t):
+          $slug = $t['slug'] ?: (string) $t['id'];
+          $hl = paketHargaLabel($t, true); ?>
+          <label class="fm-radio">
+            <input type="radio" name="paket" value="<?= e($slug) ?>" <?= $pilihId === (int) $t['id'] ? 'checked' : '' ?>>
+            <span>
+              <span class="pk-h"><b><?= e($t['nama']) ?></b>
+                <span class="pk-r"><?= $hl ? e($hl) : te('harga via WhatsApp') ?></span></span>
+              <?php if ($t['ringkas']): ?><span class="pk-d"><?= e($t['ringkas']) ?></span><?php endif; ?>
+              <?php if (!empty($t['tamu'])): ?><span class="pk-t">±<?= number_format((int) $t['tamu'], 0, ',', '.') ?> <?= te('tamu') ?></span><?php endif; ?>
+            </span>
           </label>
         <?php endforeach; ?>
+        <label class="fm-radio">
+          <input type="radio" name="paket" value="" <?= $pilihId === 0 ? 'checked' : '' ?>>
+          <span><span class="pk-h"><b><?= te('Belum tahu') ?></b></span>
+            <span class="pk-d"><?= te('Bantu kami memilih — admin akan menyarankan yang paling pas.') ?></span></span>
+        </label>
       </div>
-
-      <span class="fm-sub"><?= te('Top 5 prioritas') ?></span>
-      <p class="fm-ket"><?= te('Dari yang dicentang, lima mana yang paling ingin kalian maksimalkan. Sisanya kami sesuaikan dengan anggaran yang tersisa.') ?></p>
-      <?= blokTop5($katForm, array_map('intval', (array) ($_POST['top_vendor'] ?? [])), true) ?>
+      <?php if ($paketWeb): ?>
+        <a class="fm-lihat" href="<?= e(url('pricelist')) ?>" target="_blank" rel="noopener"><?= te('Lihat isi lengkap tiap paket') ?> ↗</a>
+      <?php endif; ?>
     </fieldset>
-    <?php endif; ?>
+
+    <fieldset>
+      <legend><?= te('Cerita singkat') ?></legend>
+      <?php if ($isi['brief'] !== ''): ?>
+        <span class="fm-sub" style="margin-top:0"><?= te('Susunan hari dari situs ikut terkirim') ?></span>
+        <div class="fm-brief"><?= e($isi['brief']) ?></div>
+      <?php endif; ?>
+      <label><?= te('Yang ingin kalian ceritakan') ?>
+        <textarea name="catatan" rows="4"
+          placeholder="<?= te('Konsep yang dibayangkan, prosesi adat, atau pertanyaan apa pun.') ?>"><?= e($isi['catatan']) ?></textarea></label>
+      <label><?= te('Tahu Callalily dari mana') ?>
+        <select name="sumber">
+          <?php foreach (FORM_SUMBER as $k => $v): ?>
+            <option value="<?= $k ?>" <?= $isi['sumber'] === $k ? 'selected' : '' ?>><?= te($v) ?></option>
+          <?php endforeach; ?>
+        </select></label>
+    </fieldset>
 
     <button class="btn solid fm-kirim" type="submit"><?= te('Kirim') ?></button>
-    <p class="fm-nb"><?= te('Data ini hanya dipakai untuk menyiapkan penawaran kalian. Tidak dibagikan ke pihak lain.') ?></p>
+    <p class="fm-nb"><?= te('Data ini hanya dipakai untuk menyiapkan price list dan penawaran kalian. Tidak dibagikan ke pihak lain.') ?></p>
   </form>
 
 <?php endif; ?>
 </div>
 
 <script>
-// Pilihan sitting hanya relevan kalau jenis acaranya sitting. Menampilkannya
-// terus-menerus membuat orang mengira wajib diisi.
-(() => {
-  const j = document.getElementById('fJenis'), b = document.getElementById('fSit');
-  if (!j || !b) return;
-  const sync = () => { b.hidden = j.value !== 'sitting'; };
-  j.addEventListener('change', sync); sync();
-})();
+// Tombol dikunci setelah ditekan: kiriman ganda dari jari yang menekan dua
+// kali adalah sumber klien kembar paling umum.
+document.querySelector('.fm-form')?.addEventListener('submit', e => {
+  const b = e.target.querySelector('.fm-kirim');
+  setTimeout(() => { b.disabled = true; b.textContent = 'Mengirim…'; }, 0);
+});
 </script>
-<?= blokTop5Skrip() ?>
 <?php require __DIR__ . '/partials/public-foot.php';

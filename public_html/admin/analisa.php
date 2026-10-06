@@ -81,12 +81,11 @@ if ($klienId) {
     // Tebak momen dan hasil dari tahap sekarang, supaya tidak perlu mengisi
     // hal yang sudah diketahui sistem.
     $tebakHasil = in_array($k['stage'], ['deal','persiapan','harih','selesai'], true) ? 'berhasil' : 'gagal';
-    $tebakMomen = match ($k['stage']) {
-        'pricelist'  => 'pricelist',
-        'selesai'    => 'pascaacara',
-        'deal', 'persiapan', 'harih' => 'deal',
-        default      => ($k['stage_batal'] ?: 'penawaran'),
-    };
+    // Klien batal memakai titik gugur yang dicatat saat dibatalkan;
+    // selebihnya diturunkan dari tahapnya (menunggu DP dihitung titik deal).
+    $tebakMomen = $k['stage'] === 'batal'
+        ? ($k['stage_batal'] ?: 'pricelist')
+        : momenGugur($k['stage']);
 
     adminHead('Analisa · ' . $nama, 'analisa');
     pageHead('Analisa — ' . $nama,
@@ -106,8 +105,8 @@ if ($klienId) {
           </select></div>
         <div class="field"><label for="mo">Terjadi di titik mana</label>
           <select id="mo" name="momen">
-            <?php foreach (['pricelist'=>'Setelah price list dikirim','penawaran'=>'Setelah penawaran dikirim',
-                            'deal'=>'Saat kontrak / deal','pascaacara'=>'Setelah acara selesai'] as $k2=>$v): ?>
+            <?php foreach (['pricelist'=>'Setelah price list dikirim','penawaran'=>'Setelah penawaran khusus dikirim',
+                            'deal'=>'Saat DP / deal','pascaacara'=>'Setelah acara selesai'] as $k2=>$v): ?>
               <option value="<?= $k2 ?>" <?= $tebakMomen === $k2 ? 'selected' : '' ?>><?= $v ?></option>
             <?php endforeach; ?>
           </select></div>

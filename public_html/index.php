@@ -763,6 +763,7 @@ input[type=date]::-webkit-calendar-picker-indicator{
 <nav>
   <a class="brand" href="#subuh">Callalily<sup>PARTY · WEDDING ORGANIZER</sup></a>
   <div class="navr">
+    <a class="navlink" href="<?= url('pricelist') ?>"><?= t('Price list') ?></a>
     <a class="navlink" href="<?= url('galeri') ?>"><?= t('Galeri pesta') ?></a>
     <a class="navlink" href="<?= url('vendor') ?>"><?= t('Jenis vendor') ?></a>
     <a class="navlink" href="<?= url('blog') ?>"><?= t('Jurnal') ?></a>
@@ -1005,7 +1006,8 @@ input[type=date]::-webkit-calendar-picker-indicator{
       </article>
     </div>
 
-    <p class="ask-note rv"><b>Kenapa tidak ada harga di sini?</b> Karena tidak ada dua hari yang sama. Jumlah acara, tamu, jarak venue, dan tanggalnya menggeser angkanya cukup jauh — menempel satu nominal di halaman ini hanya akan salah untuk hampir semua orang. Susun harimu di bawah, kirim drafnya, penawarannya kami hitung khusus untuk susunan itu.</p>
+    <p class="ask-note rv"><b>Mencari harga?</b> Paket dan harganya ada di halaman <a href="<?= url('pricelist') ?>" style="color:var(--ember)">price list</a>. Karena tidak ada dua hari yang sama — jumlah acara, tamu, jarak venue, dan tanggalnya menggeser angkanya — susun harimu di bawah dan kirim drafnya; price list lengkapnya kami kirim sebagai PDF lewat WhatsApp.</p>
+    <p class="rv" style="margin-top:18px"><a class="btn" href="<?= url('pricelist') ?>"><?= t('Lihat price list paket →') ?></a></p>
   </div>
 </section>
 
@@ -1570,17 +1572,10 @@ function render(){
   // jadi, dan datanya berakhir sebagai teks yang harus diketik ulang
   // seseorang. Lewat formulir, susunan yang sama masuk langsung ke panel
   // sebagai klien — sudah bisa ditindaklanjuti tanpa disalin.
-  // Kategori yang dipilih ikut dibawa sebagai daftar id. Formulir
-  // mencentangnya sendiri di sana — tetap bisa ditambah atau dikurangi,
-  // karena yang dikirim adalah keadaan awal, bukan kunci.
-  const katTerpilih = SERVICES
-    .filter(x => state.s.has(x.id) && x.cat)
-    .map(x => x.cat)
-    .join(",");
-
+  // Layanan yang dipilih sudah tertulis di brief; formulir menyimpannya
+  // sebagai catatan klien, bukan sebagai centang kebutuhan vendor.
   const tautForm = FORM_URL + (FORM_URL.includes("?") ? "&" : "?")
-                 + "brief=" + encodeURIComponent(briefMsg)
-                 + (katTerpilih ? "&vendor=" + encodeURIComponent(katTerpilih) : "");
+                 + "brief=" + encodeURIComponent(briefMsg);
   waBtn.href = waBtnM.href = tautForm;
 }
 render();

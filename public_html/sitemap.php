@@ -41,6 +41,7 @@ try {
 $add(url(),          null,                        'weekly',  '1.0');
 $add(url('galeri'),  null,                        'weekly',  '0.9', $gambarGaleri);
 $add(url('vendor'),  null,                        'monthly', '0.8');
+$add(url('pricelist'), null,                      'monthly', '0.9');
 
 // Halaman kategori adalah pintu masuk pencarian terbesar untuk jasa
 // pernikahan — orang mencari "dekorasi pernikahan jogja" jauh lebih sering

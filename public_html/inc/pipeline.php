@@ -10,56 +10,51 @@
  * klien muncul di daftar "perlu ditindaklanjuti" — itulah mekanisme yang
  * mencegah prospek hilang begitu saja.
  *
- * Alur normal:
- *   baru → price list → spesifikasi → penawaran → deal → persiapan → hari-H → selesai
+ * Alur yang disepakati owner (Oktober 2026), dua pegangan:
  *
- *   baru         price list dikirim            → pricelist   (otomatis saat ditandai terkirim)
- *   pricelist    klien cocok dengan price list → spesifikasi (tombol "Klien cocok")
- *                konsultasi dijadwalkan        → spesifikasi (otomatis dari Jadwal)
- *   spesifikasi  penawaran dikirim             → penawaran   (otomatis saat ditandai terkirim)
- *   penawaran    klien setuju                  → deal        (termin + event + serah ke office)
- *   deal         mulai persiapan               → persiapan   (checklist dibuat)
- *   persiapan    H-7                           → hari-H      (cron)
- *   hari-H       acara lewat                   → selesai     (cron)
+ *   ADMIN EARLY
+ *   baru       isi biodata awal, kirim price list (paket)  → pricelist  (otomatis saat terkirim)
+ *   pricelist  klien cocok                                → dp         (termin disusun, DP ditagih)
+ *   dp         DP 30% diterima                            → deal       (serah ke admin office)
+ *
+ *   ADMIN OFFICE
+ *   deal       biodata lengkap & keluarga, dekor, venue,
+ *              vendor, termin, meeting                    → persiapan  (checklist dibuat)
+ *   persiapan  H-7                                        → hari-H     (cron)
+ *   hari-H     acara lewat                                → selesai    (cron)
  *
  * Alur gagal:
  *   dari tahap mana pun → batal (wajib isi alasan, supaya bisa dievaluasi)
+ *
+ * Tahap 'spesifikasi' dan 'penawaran' dari versi sebelumnya masih dikenal
+ * (untuk data lama) tapi tidak lagi ada di jalur: penggalian spesifikasi
+ * kini dikerjakan admin office SETELAH DP.
  */
 
 const PIPE_STAGES = [
-    // Disamakan dengan enum di database sejak migration-v8. Sebelumnya
-    // konstanta ini masih memuat 'meeting' dan 'negosiasi' sementara kolomnya
-    // sudah berubah — akibatnya tahap 'pricelist' dan 'spesifikasi' tidak
-    // pernah muncul di antarmuka dan tidak bisa dipilih sama sekali.
     'baru' => [
         'label' => 'Prospek baru',
-        'desc'  => 'Masuk dari DM, WhatsApp, atau formulir. Belum ada pembicaraan serius.',
-        'next'  => 'Kirim price list',
+        'desc'  => 'Masuk dari DM, WhatsApp, atau formulir. Isi biodata awal, lalu kirim price list.',
+        'next'  => 'Lengkapi biodata awal & kirim price list',
         'sla'   => 1,
     ],
     'pricelist' => [
-        'label' => 'Price list',
+        'label' => 'Price list terkirim',
         'desc'  => 'Price list sudah dikirim, menunggu jawaban cocok atau tidak.',
         'next'  => 'Tanyakan tanggapan price list',
         'sla'   => 3,
     ],
-    'spesifikasi' => [
-        'label' => 'Spesifikasi',
-        'desc'  => 'Cocok dengan price list. Sedang menggali base information — konsultasi terjadi di tahap ini.',
-        'next'  => 'Lengkapi base information, lalu susun penawaran',
-        'sla'   => 4,
-    ],
-    'penawaran' => [
-        'label' => 'Penawaran',
-        'desc'  => 'Penawaran sudah dikirim, menunggu keputusan.',
-        'next'  => 'Tanyakan tanggapan penawaran',
+    'dp' => [
+        'label' => 'Menunggu DP',
+        'desc'  => 'Klien cocok. DP 30% sudah ditagih — begitu masuk, klien diserahkan ke admin office.',
+        'next'  => 'Tagih DP 30% & konfirmasi transfer',
         'sla'   => 3,
     ],
     'deal' => [
-        'label' => 'Deal',
-        'desc'  => 'Kontrak ditandatangani. Peran berpindah ke admin office.',
-        'next'  => 'Buat grup WA dan masukkan vendor',
-        'sla'   => 2,
+        'label' => 'Deal · penyusunan',
+        'desc'  => 'DP masuk, dipegang admin office: biodata lengkap & keluarga, dekor, venue, vendor, termin, dan meeting.',
+        'next'  => 'Lengkapi biodata & keluarga, susun dekor dan venue',
+        'sla'   => 7,
     ],
     'persiapan' => [
         'label' => 'Persiapan',
@@ -85,13 +80,30 @@ const PIPE_STAGES = [
         'next'  => '',
         'sla'   => 99,
     ],
+    // Tahap lama — hanya untuk membaca data sebelum v23.
+    'spesifikasi' => [
+        'label' => 'Spesifikasi (lama)',
+        'desc'  => 'Tahap versi lama. Pindahkan ke Price list atau Menunggu DP.',
+        'next'  => 'Pindahkan ke tahap yang sesuai',
+        'sla'   => 1,
+    ],
+    'penawaran' => [
+        'label' => 'Penawaran (lama)',
+        'desc'  => 'Tahap versi lama. Pindahkan ke Price list atau Menunggu DP.',
+        'next'  => 'Pindahkan ke tahap yang sesuai',
+        'sla'   => 1,
+    ],
 ];
 
-/** Tahap yang masih aktif (dipakai untuk papan pipeline). */
-// Tahap yang dianggap masih berjalan. Ikut disamakan dengan PIPE_STAGES —
-// sempat tertinggal memuat 'meeting' dan 'negosiasi', sehingga papan pipeline
-// menampilkan kolom yang sudah tidak ada dan melewatkan dua tahap baru.
-const PIPE_ACTIVE = ['baru', 'pricelist', 'spesifikasi', 'penawaran', 'deal', 'persiapan', 'harih'];
+/** Tahap yang masih berjalan, berurutan — dipakai papan pipeline. */
+const PIPE_ACTIVE = ['baru', 'pricelist', 'dp', 'deal', 'persiapan', 'harih'];
+
+/** Pegangan per peran. Tahap lama ikut admin early karena belum DP. */
+const TAHAP_EARLY  = ['baru', 'pricelist', 'dp', 'spesifikasi', 'penawaran'];
+const TAHAP_OFFICE = ['deal', 'persiapan', 'harih'];
+
+/** Tahap yang boleh dipilih di "Ubah tahap manual". */
+const TAHAP_PILIHAN = ['baru', 'pricelist', 'dp', 'deal', 'persiapan', 'harih', 'selesai', 'batal'];
 
 function stageLabel(string $s): string { return PIPE_STAGES[$s]['label'] ?? $s; }
 function stageNext(string $s): string  { return PIPE_STAGES[$s]['next']  ?? ''; }
@@ -122,10 +134,12 @@ function stageSudahDeal(string $s): bool
  */
 function momenGugur(string $stage): string
 {
+    // 'dp' dihitung gugur di titik deal: klien sudah cocok dengan harga,
+    // yang gagal adalah komitmennya — sebab yang perlu dianalisa berbeda.
     return match ($stage) {
         'baru', 'pricelist'              => 'pricelist',
         'spesifikasi', 'penawaran'       => 'penawaran',
-        'deal', 'persiapan', 'harih'     => 'deal',
+        'dp', 'deal', 'persiapan', 'harih' => 'deal',
         'selesai'                        => 'pascaacara',
         default                          => 'penawaran',
     };
@@ -289,6 +303,77 @@ function checklistSusun(int $clientId): int
     return $n;
 }
 
+/**
+ * Termin DP — baris pembayaran pertama yang ditagih saat dealing.
+ * Dikenali dari kode 'dealing', lalu baris wajib, lalu urutan pertama.
+ */
+function terminDp(int $clientId): ?array
+{
+    return one("SELECT * FROM payments WHERE client_id = ?
+                ORDER BY (kode = 'dealing') DESC, wajib DESC, sort_order, id LIMIT 1", [$clientId]);
+}
+
+/**
+ * DP diterima → klien deal dan diserahkan ke admin office.
+ *
+ * Satu-satunya pintu serah terima di alur baru: owner menetapkan admin early
+ * memegang klien SAMPAI DP 30% masuk. Dipanggil dari tombol "DP sudah masuk"
+ * dan dari "Tandai lunas" pada termin DP.
+ */
+function dpDiterima(int $clientId, ?int $userId = null, string $tanggal = '', string $metode = ''): array
+{
+    $c = one("SELECT stage FROM clients WHERE id = ?", [$clientId]);
+    if (!$c) throw new RuntimeException('Klien tidak ditemukan.');
+    $tanggal = $tanggal && strtotime($tanggal) ? date('Y-m-d', strtotime($tanggal)) : date('Y-m-d');
+
+    $dp = terminDp($clientId);
+    if (!$dp) {
+        if (!terminSusun($clientId)) {
+            throw new RuntimeException('Termin belum ada dan nilai deal kosong. Isi nilai deal dulu.');
+        }
+        $dp = terminDp($clientId);
+    }
+    if (!$dp['paid_at']) {
+        q("UPDATE payments SET paid_at = ?, method = IF(? <> '', ?, method) WHERE id = ?",
+          [$tanggal, $metode, $metode, $dp['id']]);
+        clientLog($clientId, 'bayar', $dp['label'] . ' diterima', rupiah((float) $dp['amount'])
+                  . ($metode ? ' · ' . $metode : ''), $userId);
+    }
+
+    $info = [];
+    if (!stageSudahDeal($c['stage'])) {
+        $r = clientSetStage($clientId, 'deal', $userId, $dp['label'] . ' diterima ' . tanggalID($tanggal) . '.');
+        $info = $r['info'];
+    }
+    return ['dp' => $dp, 'info' => $info];
+}
+
+/**
+ * Nilai kontrak berubah setelah termin tersusun (tambahan paket, potongan):
+ * sisa nilai dibagi ulang ke termin yang BELUM dibayar menurut perbandingan
+ * persennya. Termin yang sudah lunas tidak disentuh.
+ */
+function terminSesuaikan(int $clientId): int
+{
+    $c = one("SELECT deal_value FROM clients WHERE id = ?", [$clientId]);
+    $total = (float) ($c['deal_value'] ?? 0);
+    if ($total <= 0) return 0;
+    $lunas = (float) (one("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE client_id = ? AND paid_at IS NOT NULL",
+                          [$clientId])['v'] ?? 0);
+    $belum = all("SELECT id, persen FROM payments WHERE client_id = ? AND paid_at IS NULL ORDER BY sort_order, id", [$clientId]);
+    if (!$belum) return 0;
+    $sisa  = max(0, $total - $lunas);
+    $bobot = array_sum(array_map(fn($p) => (float) ($p['persen'] ?: 0), $belum)) ?: count($belum);
+    $terpakai = 0.0;
+    foreach ($belum as $i => $p) {
+        $w = (float) ($p['persen'] ?: 0) ?: 1;
+        $amt = $i === count($belum) - 1 ? $sisa - $terpakai : round($sisa * $w / $bobot);
+        $terpakai += $amt;
+        q("UPDATE payments SET amount = ? WHERE id = ?", [$amt, $p['id']]);
+    }
+    return count($belum);
+}
+
 /** Catat aktivitas ke garis waktu klien. */
 function clientLog(int $clientId, string $type, string $title, string $detail = '', ?int $userId = null): void
 {
@@ -300,10 +385,10 @@ function clientLog(int $clientId, string $type, string $title, string $detail = 
  * Pindahkan klien ke tahap lain, sekaligus jalankan efek sampingnya.
  *
  * Efek yang otomatis terjadi:
- *   → spesifikasi : catat kapan price list disetujui
- *   → deal        : nilai deal diambil dari penawaran yang disetujui (kalau
- *                   belum diisi), event dibuat, termin disusun dari template
- *                   pembayaran, klien pindah ke admin office
+ *   → dp          : nilai deal = price list/penawaran yang disetujui, termin
+ *                   disusun dari template pembayaran, DP 30% ditagih
+ *   → deal        : event dibuat, termin disusun (kalau belum), klien pindah
+ *                   ke admin office
  *   → persiapan / hari-H : checklist H-90 sampai H+3 (kalau belum ada)
  *   → batal       : alasan WAJIB, titik gugur dicatat untuk Analisa
  *   ← mundur ke sebelum deal : pegangan kembali ke admin early
@@ -352,19 +437,39 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
         q("UPDATE clients SET spesifikasi_at = COALESCE(spesifikasi_at, NOW()) WHERE id = ?", [$id]);
     }
 
-    if ($stage === 'deal') {
-        // Nilai deal = total penawaran yang disetujui. Dulu kolom ini harus
-        // diketik ulang manual di Data klien; kalau lupa, termin tidak pernah
-        // tersusun dan tidak ada yang memberi tahu.
-        $nilai = (float) ($c['deal_value'] ?? 0);
-        if ($nilai <= 0) {
-            $qc = one("SELECT total FROM quotes WHERE client_id = ? AND status = 'cocok' AND jenis = 'penawaran'
-                       ORDER BY decided_at DESC, id DESC LIMIT 1", [$id]);
-            if ($qc && (float) $qc['total'] > 0) {
-                $nilai = (float) $qc['total'];
-                q("UPDATE clients SET deal_value = ? WHERE id = ?", [$nilai, $id]);
-            }
+    // Nilai deal = total price list / penawaran yang disetujui. Dulu kolom
+    // ini harus diketik ulang manual di Data klien; kalau lupa, termin tidak
+    // pernah tersusun dan tidak ada yang memberi tahu.
+    $nilai = (float) ($c['deal_value'] ?? 0);
+    if (($stage === 'dp' || $stage === 'deal') && $nilai <= 0) {
+        $qc = one("SELECT total FROM quotes WHERE client_id = ? AND status = 'cocok'
+                   ORDER BY decided_at DESC, id DESC LIMIT 1", [$id]);
+        if ($qc && (float) $qc['total'] > 0) {
+            $nilai = (float) $qc['total'];
+            q("UPDATE clients SET deal_value = ? WHERE id = ?", [$nilai, $id]);
         }
+    }
+
+    if ($stage === 'dp') {
+        // Termin disusun SEKARANG, bukan saat deal: tagihan DP-nya harus sudah
+        // ada untuk dikirim ke klien, lengkap dengan nominal dan tenggatnya.
+        if ($nilai > 0) {
+            $n = terminSusun($id);
+            if ($n) $info[] = "Termin pembayaran disusun dari template ($n termin).";
+            $dp = terminDp($id);
+            if ($dp) {
+                q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
+                  ['Tagih ' . $dp['label'] . ' · ' . rupiah((float) $dp['amount']),
+                   $dp['due_date'] ?: date('Y-m-d', strtotime('+3 day')), $id]);
+                $info[] = 'Tagih ' . $dp['label'] . ' ' . rupiah((float) $dp['amount'])
+                        . '. Begitu ditandai lunas, klien otomatis diserahkan ke admin office.';
+            }
+        } else {
+            $info[] = 'Nilai deal belum ada — isi harga price list atau nilai deal dulu supaya DP bisa ditagih.';
+        }
+    }
+
+    if ($stage === 'deal') {
 
         if (!$c['event_id'] && $c['wedding_date']) {
             $judul = trim(($c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : '')));
@@ -381,9 +486,9 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
         if ($nilai > 0) {
             $n = terminSusun($id);
             if ($n) $info[] = "Termin pembayaran disusun dari template ($n termin).";
-        } else {
-            $info[] = 'Nilai deal belum ada, jadi termin belum disusun. Isi nilai deal di Data klien, '
-                    . 'lalu tekan "Susun termin" di kartu Pembayaran.';
+        } elseif (!(int) (one("SELECT COUNT(*) n FROM payments WHERE client_id = ?", [$id])['n'] ?? 0)) {
+            $info[] = 'Nilai deal belum ada, jadi termin belum disusun. Isi nilai deal di tab Biodata, '
+                    . 'lalu tekan "Susun termin" di tab Pembayaran.';
         }
 
         q("UPDATE clients SET contract_signed_at = COALESCE(contract_signed_at, NOW()),

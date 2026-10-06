@@ -44,6 +44,7 @@ RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^ form.php [L,QSA]
 
 RewriteRule ^sitemap\.xml$ sitemap.php [L]
+RewriteRule ^pricelist$  pricelist.php [L]
 RewriteRule ^galeri$     galeri.php  [L]
 RewriteRule ^blog$       blog.php    [L]
 

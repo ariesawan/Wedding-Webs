@@ -57,21 +57,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $id = insertId();
             }
 
-            // Sambungan antara jadwal dan pipeline: konsultasi terjadi di tahap
-            // Spesifikasi, jadi prospek yang dijadwalkan bertemu ikut naik ke
-            // sana. Dulu baris ini memanggil tahap 'meeting' yang sudah dihapus
-            // sejak v8 — setiap jadwal untuk prospek baru gagal setengah jalan:
-            // barisnya tersimpan, tapi kalender Google dan email tidak pernah
-            // terkirim.
+            // Jadwal TIDAK memindahkan tahap. Di alur sekarang tahap hanya maju
+            // lewat price list → cocok → DP; pertemuan terjadi di mana saja
+            // (konsultasi admin early, meeting persiapan admin office).
+            // Dulu jadwal menaikkan prospek ke tahap Spesifikasi, yang sudah
+            // tidak dipakai lagi.
             if (!empty($data['client_id'])) {
                 $cid = (int) $data['client_id'];
-                clientMajuKe($cid, 'spesifikasi', $user['id'], 'Konsultasi dijadwalkan.');
                 clientLog($cid, 'meeting', 'Pertemuan dijadwalkan: ' . $data['title'],
                     tanggalID($startAt, true) . ' WIB · ' .
                     ['meet'=>'Google Meet','zoom'=>'Zoom','onsite'=>'Tatap muka','phone'=>'Telepon'][$data['mode']],
                     $user['id']);
-                // Tindakan berikutnya diarahkan ke tanggal pertemuan itu sendiri.
-                q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
+                // Tindakan berikutnya diarahkan ke tanggal pertemuan — kecuali
+                // klien sedang ditagih DP: tenggat DP lebih penting.
+                q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ? AND stage <> 'dp'",
                   ['Jalankan pertemuan, lalu catat hasilnya', date('Y-m-d', strtotime($startAt)), $cid]);
             }
 
@@ -135,23 +134,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pesan = 'Hasil pertemuan dicatat.';
 
             if ($m && $m['client_id']) {
-                $label = ['lanjut' => 'Lanjut ke penawaran', 'pikir' => 'Masih dipikir', 'batal' => 'Tidak jadi'][$hasil] ?? '—';
+                $label = ['lanjut' => 'Lanjut', 'pikir' => 'Masih dipikir', 'batal' => 'Tidak jadi'][$hasil] ?? '—';
                 clientLog((int) $m['client_id'], 'meeting', 'Hasil pertemuan: ' . $label, $ket, $user['id']);
 
-                // Hasil pertemuan langsung menentukan langkah berikutnya.
+                // Hasil pertemuan menentukan langkah berikutnya — sesuai tahap
+                // klien saat ini, bukan memindahkan tahapnya.
+                $cid = (int) $m['client_id'];
+                $tahap = (string) (one("SELECT stage FROM clients WHERE id = ?", [$cid])['stage'] ?? '');
                 if ($hasil === 'lanjut') {
-                    // "Lanjut" artinya penawarannya siap DISUSUN — belum dikirim.
-                    // Tahap Penawaran berarti "sudah dikirim, menunggu jawaban";
-                    // memindahkannya ke sana di titik ini membuat papan bilang
-                    // klien sedang menimbang dokumen yang belum pernah ada.
-                    $cid = (int) $m['client_id'];
-                    clientMajuKe($cid, 'spesifikasi', $user['id'], $ket);
+                    [$aksi, $hari] = match ($tahap) {
+                        'baru', 'spesifikasi', 'penawaran' => ['Kirim price list', 1],
+                        'pricelist' => ['Kirim price list revisi / minta keputusan', 2],
+                        'dp'        => ['Tagih DP 30% & konfirmasi transfer', 2],
+                        default     => ['Tindak lanjuti hasil meeting', 3],
+                    };
                     q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
-                      ['Susun dan kirim penawaran', date('Y-m-d', strtotime('+3 day')), $cid]);
-                    $pesan .= ' Tindakan berikutnya: susun dan kirim penawaran (tenggat 3 hari).';
+                      [$aksi, date('Y-m-d', strtotime("+$hari day")), $cid]);
+                    $pesan .= " Tindakan berikutnya: " . mb_strtolower($aksi) . " (tenggat $hari hari).";
                 } elseif ($hasil === 'batal') {
-                    clientSetStage((int) $m['client_id'], 'batal', $user['id'], $ket ?: 'Tidak berlanjut setelah konsultasi.');
-                    $pesan .= ' Klien dipindahkan ke arsip Tidak jadi.';
+                    if (stageSudahDeal($tahap)) {
+                        // Klien yang sudah DP tidak diarsipkan dari hasil satu
+                        // pertemuan — pembatalan kontrak perlu keputusan sadar.
+                        q("UPDATE clients SET next_action = ?, next_action_at = CURDATE() WHERE id = ?",
+                          ['Klien ragu melanjutkan — bahas dengan owner', $cid]);
+                        $pesan .= ' Klien sudah DP, jadi tidak diarsipkan otomatis. Ubah tahapnya manual bila memang batal.';
+                    } else {
+                        clientSetStage($cid, 'batal', $user['id'], $ket ?: 'Tidak berlanjut setelah konsultasi.');
+                        $pesan .= ' Klien dipindahkan ke arsip Tidak jadi.';
+                    }
                 } elseif ($hasil === 'pikir') {
                     q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
                       ['Follow up hasil konsultasi', date('Y-m-d', strtotime('+3 day')), $m['client_id']]);
@@ -318,7 +328,7 @@ if ($edit || $isNew):
             <label for="oc">Hasil</label>
             <select id="oc" name="outcome">
               <option value="">— belum ditentukan —</option>
-              <option value="lanjut" <?= $edit['outcome'] === 'lanjut' ? 'selected' : '' ?>>Lanjut — siap dikirimi penawaran</option>
+              <option value="lanjut" <?= $edit['outcome'] === 'lanjut' ? 'selected' : '' ?>>Lanjut — sesuai rencana</option>
               <option value="pikir"  <?= $edit['outcome'] === 'pikir'  ? 'selected' : '' ?>>Masih menimbang — perlu ditindak lagi</option>
               <option value="batal"  <?= $edit['outcome'] === 'batal'  ? 'selected' : '' ?>>Tidak lanjut</option>
             </select>
@@ -387,7 +397,7 @@ if ($edit || $isNew):
             <label for="oc">Bagaimana hasilnya</label>
             <select id="oc" name="outcome">
               <option value="" <?= ($edit['outcome'] ?? '') === '' ? 'selected' : '' ?>>— belum dicatat —</option>
-              <option value="lanjut" <?= ($edit['outcome'] ?? '') === 'lanjut' ? 'selected' : '' ?>>Lanjut — kirim penawaran</option>
+              <option value="lanjut" <?= ($edit['outcome'] ?? '') === 'lanjut' ? 'selected' : '' ?>>Lanjut — sesuai rencana</option>
               <option value="pikir"  <?= ($edit['outcome'] ?? '') === 'pikir'  ? 'selected' : '' ?>>Masih dipikir — follow up 3 hari lagi</option>
               <option value="batal"  <?= ($edit['outcome'] ?? '') === 'batal'  ? 'selected' : '' ?>>Tidak jadi — masuk arsip</option>
             </select>

@@ -46,7 +46,7 @@ const AKSES_PERAN = [
     'admin_early' => [
         'index', 'klien', 'chat', 'chat-api', 'wa-sesi', 'jadwal', 'cek-bentrok',
         'inbox', 'penyusun', 'analisa', 'alert-api', 'oauth-callback', 'logout',
-        'penawaran', 'template-penawaran',
+        'penawaran', 'template-penawaran', 'paket', 'formulir',
     ],
     'admin_office' => [
         'index', 'klien', 'chat', 'chat-api', 'wa-sesi', 'jadwal', 'cek-bentrok',

@@ -1,41 +1,37 @@
 <?php
 /**
  * ============================================================
- * PENAWARAN
+ * PRICE LIST & PENAWARAN
  * ============================================================
  *
- * Halaman yang selama ini tidak ada. inc/penawaran.php sudah lengkap sejak
- * lama — quoteBuat(), quoteHitung(), quoteTeksWA(), quoteKirimWA(),
- * quoteCocok() — tapi tidak satu pun dipanggil dari mana pun. Tahap
- * "penawaran" di pipeline cuma label yang dimajukan manual, tanpa dokumen
- * apa pun di baliknya.
+ * Alur yang dipegang admin early, sesuai owner:
  *
- * Alur yang ditangani di sini, semuanya milik admin early:
+ *   Buat    → dari paket (paket + rincian isi) atau kosong
+ *   Sunting → harga paket, isi per kelompok, tambahan, opsional, diskon
+ *   Kirim   → PDF terlampir di WhatsApp (otomatis bila penyedia WA aktif,
+ *             atau unduh PDF + buka WhatsApp manual); tahap → Price list
+ *   Tanggapan:
+ *     cocok        → Menunggu DP (termin disusun, DP 30% ditagih)
+ *     menawar      → catat angka yang diminta, buat revisi
+ *     tidak cocok  → klien ke arsip "tidak jadi", lanjut ke Analisa
  *
- *   Buat  → item terisi otomatis dari jenis vendor + Top 5 yang dicentang
- *   Sunting → harga per baris, tandai opsional, diskon, catatan
- *   Kirim → teks WhatsApp + tautan publik; status jadi 'terkirim'
- *   Nego  → catat angka yang DIMINTA klien beserta alasannya
- *   Revisi → penawaran baru yang menyalin item lama untuk disesuaikan
- *   Putus → cocok (klien deal, pindah ke admin office) atau tidak cocok
- *
- * Admin office boleh membuka tapi tidak menyunting: dia perlu membaca
- * seluruh riwayat tawar-menawar untuk tahu apa yang sudah dijanjikan dan
- * apa yang dikorbankan, tapi angkanya sudah tidak lagi urusannya.
+ * Admin office boleh membuka tapi tidak menyunting: dia perlu membaca apa
+ * yang sudah dijanjikan, tapi angkanya bukan lagi urusannya.
  */
 require_once __DIR__ . '/_layout.php';
 require_once __DIR__ . '/../inc/penawaran.php';
 require_once __DIR__ . '/../inc/pipeline.php';
+require_once __DIR__ . '/../inc/paket.php';
 $user = requireLogin();
 
-$peranSaya   = $user['role'] ?? '';
+$peranSaya    = $user['role'] ?? '';
 $bolehSunting = in_array($peranSaya, ['owner', 'admin_early'], true);
 
 /** Penjaga tunggal untuk semua aksi yang mengubah. */
 function pastikanBolehSunting(bool $boleh): void
 {
     if (!$boleh) throw new RuntimeException(
-        'Penawaran disusun admin early. Admin office bisa membaca riwayatnya, tapi tidak mengubah angkanya.');
+        'Price list disusun admin early. Admin office bisa membaca riwayatnya, tapi tidak mengubah angkanya.');
 }
 
 /** Kalimat penutup flash: tahap klien sekarang. */
@@ -52,55 +48,40 @@ function statusPenawaran(string $s): array
         'draf'        => ['Draf', 'draft'],
         'terkirim'    => ['Terkirim', 'warn'],
         'cocok'       => ['Disetujui', 'live'],
-        'revisi'      => ['Direvisi', 'draft'],
+        'revisi'      => ['Tidak berlaku', 'draft'],
         'tidak_cocok' => ['Ditolak', 'bad'],
     ][$s] ?? [$s, 'draft'];
 }
 
+$uangPost = fn($v) => (float) preg_replace('/[^\d]/', '', (string) $v);
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrfCheck();
     $act = $_POST['act'] ?? '';
+    $qid = 0;
     try {
         pastikanBolehSunting($bolehSunting);
 
         if ($act === 'buat') {
             $cid   = (int) ($_POST['client_id'] ?? 0);
-            $jenis = ($_POST['jenis'] ?? '') === 'pricelist' ? 'pricelist' : 'penawaran';
+            $jenis = ($_POST['jenis'] ?? 'pricelist') === 'penawaran' ? 'penawaran' : 'pricelist';
             if (!one("SELECT id FROM clients WHERE id = ?", [$cid])) throw new RuntimeException('Klien tidak ditemukan.');
 
-            $qid = quoteBuat($cid, $jenis, (int) $user['id']);
-
-            // Template dipakai sebagai TITIK AWAL, lalu berdiri sendiri. Isinya
-            // disalin utuh ke penawaran — bukan dirujuk. Mengubah template
-            // besok tidak boleh mengubah dokumen yang hari ini sudah dipegang
-            // klien; template_id disimpan hanya sebagai catatan asal.
             $tplId = (int) ($_POST['template_id'] ?? 0);
             if ($tplId) {
-                $tpl = one("SELECT * FROM quote_templates WHERE id = ?", [$tplId]);
-                if (!$tpl) throw new RuntimeException('Template tidak ditemukan.');
-
-                q("DELETE FROM quote_items WHERE quote_id = ?", [$qid]);
-                q("INSERT INTO quote_items (quote_id, category_id, label, detail, qty, satuan, harga, jumlah, opsional, sort_order)
-                   SELECT ?, category_id, label, detail, qty, satuan, harga, harga * qty, opsional, sort_order
-                     FROM quote_template_items WHERE template_id = ? ORDER BY sort_order, id",
-                  [$qid, $tplId]);
-                q("UPDATE quotes SET template_id = ?, catatan = ? WHERE id = ?",
-                  [$tplId, (string) $tpl['catatan_bawaan'], $qid]);
-                quoteHitung($qid);
-
-                clientLog($cid, 'sistem', ucfirst($jenis) . ' dibuat dari template',
-                          $tpl['nama'], $user['id']);
-                flash('Dibuat dari template "' . $tpl['nama'] . '". Sesuaikan harga dan barisnya di sini.');
-                redirect('admin/penawaran.php?id=' . $qid);
-            }
-
-            if (!one("SELECT id FROM quote_items WHERE quote_id = ? LIMIT 1", [$qid])) {
-                flash('Penawaran dibuat, tapi belum ada barisnya — jenis vendor di halaman klien belum dicentang. '
-                    . 'Pakai template, centang dulu kebutuhannya, atau tambahkan barisnya manual di bawah.', 'err');
+                $qid = quoteDariPaket($cid, $tplId, $jenis, (int) $user['id']);
+                $qq  = one("SELECT paket_nama, paket_harga FROM quotes WHERE id = ?", [$qid]);
+                clientLog($cid, 'sistem', ucfirst($jenis === 'pricelist' ? 'Price list' : 'Penawaran') . ' dibuat dari paket',
+                          $qq['paket_nama'], $user['id']);
+                flash('Dibuat dari paket "' . $qq['paket_nama'] . '".'
+                    . ((float) $qq['paket_harga'] > 0 ? ' Periksa isinya, lalu kirim.' : ' Harga paketnya masih kosong — isi dulu sebelum dikirim.'));
             } else {
-                flash('Penawaran dibuat dari kebutuhan vendor yang sudah dicentang.');
+                $qid = ($_POST['sumber'] ?? '') === 'kebutuhan'
+                     ? quoteBuat($cid, $jenis, (int) $user['id'])
+                     : quoteDariKosong($cid, $jenis, (int) $user['id']);
+                clientLog($cid, 'sistem', ($jenis === 'pricelist' ? 'Price list' : 'Penawaran') . ' dibuat', '', $user['id']);
+                flash('Dokumen dibuat. Isi paket atau barisnya di sini.');
             }
-            clientLog($cid, 'sistem', ucfirst($jenis) . ' dibuat', '', $user['id']);
             redirect('admin/penawaran.php?id=' . $qid);
         }
 
@@ -108,43 +89,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $qq  = $qid ? one("SELECT * FROM quotes WHERE id = ?", [$qid]) : null;
         if (!$qq) throw new RuntimeException('Penawaran tidak ditemukan.');
         $cid = (int) $qq['client_id'];
+        $terkunci = in_array($qq['status'], ['cocok', 'tidak_cocok'], true);
+        if ($terkunci && in_array($act, ['simpan', 'baris', 'hapus_baris'], true)) {
+            throw new RuntimeException('Dokumen ini sudah diputus dan terkunci. Buat revisi untuk mengubah isinya.');
+        }
 
-        if ($act === 'item_simpan') {
-            // Seluruh tabel dikirim sekaligus. Menyimpan per baris lewat AJAX
-            // terdengar lebih modern, tapi menyusun penawaran itu pekerjaan
-            // sekali duduk — dan satu tombol Simpan lebih jujur soal apa yang
-            // sudah masuk dan apa yang belum.
-            foreach (($_POST['item'] ?? []) as $iid => $row) {
-                $iid = (int) $iid;
-                $harga = (float) str_replace(['.', ','], ['', '.'], (string) ($row['harga'] ?? 0));
-                $qty   = max(0.01, (float) ($row['qty'] ?? 1));
+        if ($act === 'simpan') {
+            // Seluruh dokumen dikirim sekaligus — menyusun price list itu
+            // pekerjaan sekali duduk, dan satu tombol Simpan lebih jujur soal
+            // apa yang sudah masuk dan apa yang belum.
+            foreach ((array) ($_POST['item'] ?? []) as $iid => $row) {
+                $harga = $uangPost($row['harga'] ?? 0);
+                $qty   = max(0.01, (float) str_replace(',', '.', (string) ($row['qty'] ?? 1)));
                 q("UPDATE quote_items
-                      SET label = ?, detail = ?, qty = ?, satuan = ?, harga = ?, jumlah = ?,
+                      SET kelompok = ?, label = ?, detail = ?, qty = ?, satuan = ?, harga = ?, jumlah = ?,
                           opsional = ?, sort_order = ?
                     WHERE id = ? AND quote_id = ?",
-                  [mb_substr(trim($row['label'] ?? ''), 0, 190),
+                  [mb_substr(trim($row['kelompok'] ?? ''), 0, 80),
+                   mb_substr(trim($row['label'] ?? ''), 0, 190),
                    mb_substr(trim($row['detail'] ?? ''), 0, 400),
-                   $qty, mb_substr(trim($row['satuan'] ?? 'paket'), 0, 30),
+                   $qty, mb_substr(trim($row['satuan'] ?? 'paket'), 0, 30) ?: 'paket',
                    $harga, $harga * $qty,
                    isset($row['opsional']) ? 1 : 0,
-                   (int) ($row['sort'] ?? 0), $iid, $qid]);
+                   (int) ($row['sort'] ?? 0), (int) $iid, $qid]);
             }
-            $diskon = (float) str_replace(['.', ','], ['', '.'], (string) ($_POST['diskon'] ?? 0));
-            q("UPDATE quotes SET diskon = ?, catatan = ?, valid_until = ? WHERE id = ?",
-              [max(0, $diskon), mb_substr(trim($_POST['catatan'] ?? ''), 0, 2000),
-               $_POST['valid_until'] ?: null, $qid]);
+            q("DELETE FROM quote_items WHERE quote_id = ? AND TRIM(label) = ''", [$qid]);
+            $ph = $uangPost($_POST['paket_harga'] ?? '');
+            q("UPDATE quotes SET paket_nama = ?, paket_harga = ?, diskon = ?, catatan = ?, valid_until = ?, jenis = ? WHERE id = ?",
+              [mb_substr(trim($_POST['paket_nama'] ?? ''), 0, 120), $ph > 0 ? $ph : null,
+               max(0, $uangPost($_POST['diskon'] ?? 0)), mb_substr(trim($_POST['catatan'] ?? ''), 0, 4000),
+               ($_POST['valid_until'] ?? '') ?: null,
+               ($_POST['jenis'] ?? $qq['jenis']) === 'penawaran' ? 'penawaran' : 'pricelist', $qid]);
             quoteHitung($qid);
-            flash('Penawaran disimpan.');
+            flash('Tersimpan.');
         }
 
-        elseif ($act === 'item_tambah') {
-            $urut = (int) (one("SELECT COALESCE(MAX(sort_order),0)+10 s FROM quote_items WHERE quote_id = ?", [$qid])['s'] ?? 0);
-            q("INSERT INTO quote_items (quote_id, label, qty, satuan, harga, jumlah, sort_order)
-               VALUES (?, 'Item baru', 1, 'paket', 0, 0, ?)", [$qid, $urut]);
+        elseif ($act === 'baris') {
+            $opsi = ($_POST['jenis_baris'] ?? '') === 'opsi' ? 1 : 0;
+            $hrg  = ($_POST['jenis_baris'] ?? '') === 'tambahan';
+            $urut = (int) (one("SELECT COALESCE(MAX(sort_order),0)+10 s FROM quote_items WHERE quote_id = ?", [$qid])['s'] ?? 10);
+            q("INSERT INTO quote_items (quote_id, kelompok, label, qty, satuan, harga, jumlah, opsional, sort_order)
+               VALUES (?, ?, ?, 1, 'paket', 0, 0, ?, ?)",
+              [$qid, $opsi || $hrg ? '' : mb_substr(trim($_POST['kelompok'] ?? ''), 0, 80),
+               $opsi ? 'Tambahan opsional' : ($hrg ? 'Tambahan' : 'Isi baru'), $opsi, $urut]);
             quoteHitung($qid);
+            redirect('admin/penawaran.php?id=' . $qid . '#rincian');
         }
 
-        elseif ($act === 'item_hapus') {
+        elseif ($act === 'hapus_baris') {
             q("DELETE FROM quote_items WHERE id = ? AND quote_id = ?", [(int) $_POST['item_id'], $qid]);
             quoteHitung($qid);
             flash('Baris dihapus.');
@@ -155,66 +147,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!empty($_POST['via_wa'])) {
                 $r = quoteKirimWA($qid, (int) $user['id']);
                 if (empty($r['ok'])) {
-                    // Gagal kirim = BELUM terkirim. Dulu statusnya tetap dicap
-                    // terkirim dan pesannya bilang berhasil, jadi klien yang
-                    // tidak pernah menerima apa pun ikut ditunggu jawabannya.
+                    // Gagal kirim = BELUM terkirim. Klien yang tidak pernah
+                    // menerima apa pun tidak boleh ikut ditunggu jawabannya.
                     throw new RuntimeException('WhatsApp gagal: ' . ($r['error'] ?? 'tidak diketahui')
-                        . '. Penawaran belum ditandai terkirim — kirim manual lalu tekan "Tandai terkirim".');
+                        . '. Belum ditandai terkirim — kirim manual lalu tekan "Sudah saya kirim".');
                 }
-                flash($jenisLbl . ' terkirim lewat WhatsApp.' . tahapInfo($cid));
+                flash($jenisLbl . ' terkirim lewat WhatsApp beserta PDF-nya.' . tahapInfo($cid));
             } else {
                 quoteTandaiTerkirim($qid, (int) $user['id']);
-                clientLog($cid, 'sistem', $jenisLbl . ' ' . $qq['nomor'] . ' ditandai terkirim',
+                clientLog($cid, 'sistem', $jenisLbl . ' ' . $qq['nomor'] . ' dikirim manual',
                           'Total ' . rupiah((float) $qq['total']), $user['id']);
                 flash($jenisLbl . ' ditandai terkirim.' . tahapInfo($cid));
             }
         }
 
         elseif ($act === 'nego') {
-            // Angka yang DIMINTA klien, bukan yang kita ajukan. Selisihnya yang
-            // menentukan revisi berikutnya, dan selama ini cuma hidup di chat.
-            $nilai = (float) str_replace(['.', ','], ['', '.'], (string) ($_POST['nego_nilai'] ?? 0));
+            // Angka yang DIMINTA klien, bukan yang kita ajukan.
+            $nilai  = $uangPost($_POST['nego_nilai'] ?? 0);
             $alasan = mb_substr(trim($_POST['nego_catatan'] ?? ''), 0, 400);
-            if ($nilai <= 0) throw new RuntimeException('Angka penawaran klien belum diisi.');
-
-            q("UPDATE quotes SET nego_nilai = ?, nego_catatan = ?, nego_at = NOW(),
-                                 status = IF(status IN ('draf'), status, 'revisi')
-               WHERE id = ?", [$nilai, $alasan, $qid]);
-
-            $selisih = (float) $qq['total'] - $nilai;
+            if ($nilai <= 0) throw new RuntimeException('Angka yang diminta klien belum diisi.');
+            q("UPDATE quotes SET nego_nilai = ?, nego_catatan = ?, nego_at = NOW() WHERE id = ?", [$nilai, $alasan, $qid]);
             clientLog($cid, 'catatan', 'Klien menawar ' . rupiah($nilai),
-                      'Dari ' . rupiah((float) $qq['total']) . ' — selisih ' . rupiah($selisih)
+                      'Dari ' . rupiah((float) $qq['total']) . ' — selisih ' . rupiah((float) $qq['total'] - $nilai)
                     . ($alasan ? '. ' . $alasan : ''), $user['id']);
             flash('Tawaran klien dicatat. Buat revisi untuk menyesuaikan angkanya.');
         }
 
         elseif ($act === 'revisi') {
-            // Revisi = penawaran baru yang MENYALIN item lama, bukan menimpa.
-            // Yang lama harus tetap utuh: itu yang dipegang klien, dan kalau
-            // ada selisih ingatan soal apa yang dijanjikan, dokumen itu
-            // satu-satunya rujukan.
-            $baru = quoteBuat($cid, $qq['jenis'], (int) $user['id']);
-            q("DELETE FROM quote_items WHERE quote_id = ?", [$baru]);
-            q("INSERT INTO quote_items (quote_id, category_id, label, detail, qty, satuan, harga, jumlah, opsional, sort_order)
-               SELECT ?, category_id, label, detail, qty, satuan, harga, jumlah, opsional, sort_order
+            // Revisi = dokumen baru yang MENYALIN isi lama, bukan menimpa —
+            // yang lama sudah dipegang klien.
+            $c = one("SELECT * FROM clients WHERE id = ?", [$cid]);
+            $baru = quoteBaru($c, $qq['jenis'], (int) $user['id']);
+            q("INSERT INTO quote_items (quote_id, category_id, kelompok, label, detail, qty, satuan, harga, jumlah, opsional, sort_order)
+               SELECT ?, category_id, kelompok, label, detail, qty, satuan, harga, jumlah, opsional, sort_order
                  FROM quote_items WHERE quote_id = ?", [$baru, $qid]);
-            q("UPDATE quotes SET revisi_dari = ?, diskon = ?, catatan = ? WHERE id = ?",
-              [$qid, $qq['diskon'], $qq['catatan'], $baru]);
+            q("UPDATE quotes SET revisi_dari = ?, diskon = ?, catatan = ?, template_id = ?, paket_nama = ?, paket_harga = ? WHERE id = ?",
+              [$qid, $qq['diskon'], $qq['catatan'], $qq['template_id'], $qq['paket_nama'], $qq['paket_harga'], $baru]);
             quoteHitung($baru);
-
-            if ($qq['status'] !== 'tidak_cocok') q("UPDATE quotes SET status = 'revisi' WHERE id = ?", [$qid]);
-            clientLog($cid, 'sistem', 'Revisi penawaran dibuat', 'Dari ' . $qq['nomor'], $user['id']);
-            flash('Revisi dibuat menyalin baris sebelumnya. Sesuaikan angkanya di sini.');
+            if (in_array($qq['status'], ['draf', 'terkirim'], true)) q("UPDATE quotes SET status = 'revisi' WHERE id = ?", [$qid]);
+            clientLog($cid, 'sistem', 'Revisi dibuat', 'Dari ' . $qq['nomor'], $user['id']);
+            flash('Revisi dibuat menyalin isi sebelumnya. Sesuaikan angkanya di sini.');
             redirect('admin/penawaran.php?id=' . $baru);
         }
 
         elseif ($act === 'cocok') {
             $r = quoteCocok($qid, (int) $user['id']);
-            flash($r['tahap'] === 'spesifikasi'
-                ? "Price list cocok. Klien lanjut ke tahap Spesifikasi — jadwalkan konsultasi, centang kebutuhan vendor, lalu susun penawaran."
-                    . ($r['info'] ? "\n" . implode("\n", $r['info']) : '')
-                : "Deal. Klien diserahkan ke admin office beserta seluruh riwayat penawarannya."
-                    . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
+            flash(($r['tahap'] === 'dp'
+                    ? 'Klien cocok. Tahap: Menunggu DP — tagih DP 30%, lalu tandai lunas begitu masuk; klien otomatis diserahkan ke admin office.'
+                    : 'Disetujui.')
+                . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
             redirect('admin/klien.php?id=' . $cid);
         }
 
@@ -223,8 +204,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($alasan === '') throw new RuntimeException('Alasan wajib diisi — ini yang dibaca saat menganalisa penyebab.');
             $r = quoteTidakCocok($qid, $alasan, (int) $user['id']);
             if ($r['batal']) {
-                // Langsung ke formulir Analisa: sebabnya paling jernih diingat
-                // sekarang, dan itulah satu-satunya tempat yang bisa menghitungnya.
                 flash('Dicatat tidak cocok. Klien dipindah ke arsip "Tidak jadi" — catat sebabnya di bawah.');
                 redirect('admin/analisa.php?klien=' . $cid);
             }
@@ -234,456 +213,282 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('admin/penawaran.php?id=' . $qid);
     } catch (Throwable $e) {
         flash($e->getMessage(), 'err');
-        redirect('admin/penawaran.php' . (!empty($qid) ? '?id=' . $qid : ''));
+        redirect('admin/penawaran.php' . ($qid ? '?id=' . $qid : (!empty($_POST['client_id']) ? '?client=' . (int) $_POST['client_id'] : '')));
     }
+}
+
+/** Dokumen kosong — tanpa paket, tanpa baris. */
+function quoteDariKosong(int $cid, string $jenis, int $uid): int
+{
+    $c = one("SELECT * FROM clients WHERE id = ?", [$cid]);
+    $qid = quoteBaru($c, $jenis, $uid);
+    quoteHitung($qid);
+    return $qid;
 }
 
 $qid    = (int) ($_GET['id'] ?? 0);
 $cidGet = (int) ($_GET['client'] ?? 0);
 
 /* ============================================================
-   TAMPILAN CETAK — dipisah supaya bisa disimpan jadi PDF
-   ============================================================
-   Tidak memakai pustaka PDF sama sekali. Sistemmu tanpa Composer, jadi
-   Dompdf/mPDF berarti menyeret puluhan berkas ke shared hosting demi satu
-   halaman. Peramban sudah punya mesin PDF yang lebih bagus daripada
-   keduanya: Ctrl+P → Save as PDF. Hasilnya teks yang bisa dicari dan
-   diseleksi, bukan gambar.
-*/
-if ($qid && isset($_GET['cetak'])) {
-    $qq = one("SELECT q.*, c.name, c.partner_name, c.phone, c.email, c.wedding_date,
-                      c.venue, c.guest_estimate, c.city
-               FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$qid]);
-    if (!$qq) { http_response_code(404); die('Penawaran tidak ditemukan.'); }
-    $items = all("SELECT * FROM quote_items WHERE quote_id = ? ORDER BY sort_order, id", [$qid]);
-    $opsi  = array_filter($items, fn($i) => $i['opsional']);
-    $wajib = array_filter($items, fn($i) => !$i['opsional']);
-    $brand = setting('site_name', 'Callalily Party');
-
-    // rupiah() mengembalikan "—" untuk nol. Di dokumen yang dikirim ke klien
-    // itu tidak bisa: baris berharga nol artinya "termasuk, tanpa biaya
-    // tambahan", bukan "belum diisi". Tanda pisah membuatnya terbaca seperti
-    // data yang hilang, dan itu pertanyaan pertama yang muncul dari klien.
-    // Di dalam tabel, angka ditulis telanjang — satuannya sudah disebut sekali
-    // di kepala kolom. Mengulang "Rp" di tiap baris membuat kolomnya ramai dan
-    // justru mempersulit membandingkan besaran antar baris, yang merupakan
-    // satu-satunya alasan klien membaca tabel ini.
-    $ang = fn($n) => number_format((float) $n, 0, ',', '.');
-
-    // Di baris total, satuannya ditulis lengkap. Angka itu yang disalin ke
-    // percakapan dan transfer, jadi tidak boleh ambigu.
-    $rpc = fn($n) => setting('currency_prefix', 'Rp') . ' ' . number_format((float) $n, 0, ',', '.');
-    ?><!doctype html><html lang="id"><head><meta charset="utf-8">
-    <title><?= e($qq['nomor']) ?> — <?= e($qq['name']) ?></title>
-    <style>
-      @page { size: A4; margin: 16mm 14mm; }
-      * { box-sizing: border-box }
-      body { font: 11pt/1.55 Georgia,'Times New Roman',serif; color: #1a1a1a; margin: 0 }
-      .no-print { margin-bottom: 18px }
-      @media print { .no-print { display: none } }
-      h1 { font-size: 22pt; margin: 0 0 2px; letter-spacing: .5px }
-      .sub { color: #666; font-size: 9.5pt; margin: 0 }
-      .head { display: flex; justify-content: space-between; align-items: flex-start;
-              border-bottom: 2px solid #1a1a1a; padding-bottom: 12px; margin-bottom: 18px }
-      .meta { text-align: right; font-size: 9.5pt; color: #444 }
-      .info { display: flex; gap: 34px; margin-bottom: 20px; font-size: 10pt }
-      .info b { display: block; font-size: 8pt; text-transform: uppercase;
-                letter-spacing: 1px; color: #888; font-weight: normal; margin-bottom: 2px }
-      table { width: 100%; border-collapse: collapse; margin-bottom: 6px }
-      th { text-align: left; font-size: 8pt; text-transform: uppercase; letter-spacing: 1px;
-           color: #888; font-weight: normal; border-bottom: 1px solid #ccc; padding: 7px 6px }
-      td { padding: 9px 6px; border-bottom: 1px solid #eee; vertical-align: top }
-      /* tabular-nums membuat lebar tiap digit sama, jadi kolom angka lurus
-         ke bawah. Tanpa ini, "1" jauh lebih sempit daripada "8" dan deretan
-         rupiah terlihat bergerigi di kertas. */
-      td.r, th.r { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums }
-      .tot { width: 46%; margin-left: auto }
-      .tot td:first-child { color: #555 }
-      .det { font-size: 9pt; color: #666; display: block; margin-top: 2px }
-      .tot td { border: none; padding: 5px 6px; font-size: 11pt }
-      .tot .grand td { border-top: 2px solid #1a1a1a; font-size: 13pt; font-weight: bold; padding-top: 10px }
-      .opsi { margin-top: 22px }
-      .opsi h3 { font-size: 10pt; text-transform: uppercase; letter-spacing: 1px; color: #888;
-                 font-weight: normal; margin: 0 0 6px }
-      .note { margin-top: 24px; padding-top: 14px; border-top: 1px solid #ddd;
-              font-size: 9.5pt; color: #444; white-space: pre-wrap }
-      .foot { margin-top: 30px; font-size: 9pt; color: #888; text-align: center }
-      button { font: inherit; padding: 9px 20px; cursor: pointer; border: 1px solid #1a1a1a;
-               background: #1a1a1a; color: #fff; border-radius: 6px }
-      a.kembali { font-size: 10pt; margin-left: 12px; color: #666 }
-    </style></head><body>
-
-    <div class="no-print">
-      <button onclick="window.print()">Cetak / Simpan sebagai PDF</button>
-      <a class="kembali" href="penawaran.php?id=<?= $qid ?>">← kembali menyunting</a>
-    </div>
-
-    <div class="head">
-      <div>
-        <h1><?= e($brand) ?></h1>
-        <p class="sub"><?= e(setting('site_tagline', 'Wedding Organizer · Yogyakarta')) ?></p>
-      </div>
-      <div class="meta">
-        <b><?= $qq['jenis'] === 'pricelist' ? 'PRICE LIST' : 'PENAWARAN' ?></b><br>
-        <?= e($qq['nomor']) ?><?= $qq['revisi'] > 1 ? ' · Revisi ' . (int) $qq['revisi'] : '' ?><br>
-        <?= tanggalID(substr($qq['created_at'], 0, 10)) ?>
-        <?php if ($qq['valid_until']): ?><br>Berlaku sampai <?= tanggalID($qq['valid_until']) ?><?php endif; ?>
-      </div>
-    </div>
-
-    <div class="info">
-      <div><b>Untuk</b><?= e($qq['name'] . ($qq['partner_name'] ? ' & ' . $qq['partner_name'] : '')) ?></div>
-      <?php if ($qq['wedding_date']): ?><div><b>Tanggal acara</b><?= tanggalID($qq['wedding_date']) ?></div><?php endif; ?>
-      <?php if ($qq['venue']): ?><div><b>Venue</b><?= e($qq['venue']) ?></div><?php endif; ?>
-      <?php if ($qq['guest_estimate']): ?><div><b>Tamu</b><?= number_format((int) $qq['guest_estimate'], 0, ',', '.') ?> undangan</div><?php endif; ?>
-    </div>
-
-    <table>
-      <thead><tr><th style="width:52%">Uraian</th><th class="r">Qty</th><th class="r">Harga (Rp)</th><th class="r">Jumlah (Rp)</th></tr></thead>
-      <tbody>
-        <?php foreach ($wajib as $it): ?>
-          <tr>
-            <td><?= e($it['label']) ?><?php if ($it['detail']): ?><span class="det"><?= e($it['detail']) ?></span><?php endif; ?></td>
-            <td class="r"><?= rtrim(rtrim(number_format((float) $it['qty'], 2, ',', '.'), '0'), ',') ?> <?= e($it['satuan']) ?></td>
-            <td class="r"><?= $ang($it['harga']) ?></td>
-            <td class="r"><?= $ang($it['jumlah']) ?></td>
-          </tr>
-        <?php endforeach; ?>
-        <?php if (!$wajib): ?><tr><td colspan="4" style="color:#999">Belum ada baris.</td></tr><?php endif; ?>
-      </tbody>
-    </table>
-
-    <table class="tot">
-      <tr><td>Subtotal</td><td class="r"><?= $rpc($qq['subtotal']) ?></td></tr>
-      <?php if ((float) $qq['diskon'] > 0): ?>
-        <tr><td>Diskon</td><td class="r">− <?= $rpc($qq['diskon']) ?></td></tr>
-      <?php endif; ?>
-      <tr class="grand"><td>Total</td><td class="r"><?= $rpc($qq['total']) ?></td></tr>
-    </table>
-
-    <?php if ($opsi): ?>
-      <div class="opsi">
-        <h3>Opsional — di luar total (Rp)</h3>
-        <table>
-          <tbody>
-          <?php foreach ($opsi as $it): ?>
-            <tr><td><?= e($it['label']) ?><?php if ($it['detail']): ?><span class="det"><?= e($it['detail']) ?></span><?php endif; ?></td>
-                <td class="r"><?= $ang($it['jumlah']) ?></td></tr>
-          <?php endforeach; ?>
-          </tbody>
-        </table>
-      </div>
-    <?php endif; ?>
-
-    <?php if (trim((string) $qq['catatan']) !== ''): ?>
-      <div class="note"><?= e($qq['catatan']) ?></div>
-    <?php endif; ?>
-
-    <div class="foot">
-      <?= e($brand) ?><?php if (setting('wa_number', '')): ?> · WhatsApp <?= e(setting('wa_number')) ?><?php endif; ?>
-      <?php if (setting('site_url', '')): ?> · <?= e(setting('site_url')) ?><?php endif; ?>
-    </div>
-    </body></html><?php
-    exit;
+   PDF — yang dikirim ke klien. ?cetak=1 (tautan lama) ikut ke sini.
+   ============================================================ */
+if ($qid && (isset($_GET['pdf']) || isset($_GET['cetak']))) {
+    require_once __DIR__ . '/../inc/pdf-penawaran.php';
+    quotePdfKirim($qid, isset($_GET['unduh']));
 }
 
 /* ============================================================
-   DAFTAR PENAWARAN SATU KLIEN
+   DAFTAR SATU KLIEN + BUAT BARU
    ============================================================ */
 if ($cidGet && !$qid) {
     $c = one("SELECT * FROM clients WHERE id = ?", [$cidGet]);
     if (!$c) { http_response_code(404); die('Klien tidak ditemukan.'); }
     $riwayat = all("SELECT * FROM quotes WHERE client_id = ? ORDER BY id DESC", [$cidGet]);
+    $paket   = paketDaftar(false);
 
-    adminHead('Penawaran', 'klien');
-    pageHead('Penawaran — ' . $c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : ''),
-             'Seluruh riwayat pengajuan, tawar-menawar, dan revisi untuk klien ini.',
-             ($bolehSunting ? '<a class="btn ghost" href="template-penawaran.php">Kelola template</a> ' : '')
+    adminHead('Price list', 'klien');
+    pageHead('Price list — ' . $c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : ''),
+             'Pilih paket, sesuaikan isinya, lalu kirim PDF-nya lewat WhatsApp.',
+             ($bolehSunting ? '<a class="btn ghost" href="paket.php">Kelola paket</a> ' : '')
            . '<a class="btn ghost" href="klien.php?id=' . (int) $c['id'] . '">← Halaman klien</a>');
-
-    // Template yang cocok untuk tipe klien ini. Yang dibatasi ke tipe lain
-    // sengaja tidak ditampilkan — daftar pilihan yang memuat template yang
-    // tidak boleh dipakai cuma memperlambat dan mengundang salah pilih.
-    $tpl = []; $tplGagal = false;
-    try {
-        $tpl = all("SELECT * FROM quote_templates
-                     WHERE is_active = 1 AND tipe IN ('semua', ?)
-                     ORDER BY urutan, id", [$c['tipe_klien'] ?: 'semua']);
-    } catch (Throwable $e) {
-        // Tabelnya belum ada berarti migration-v20 belum dijalankan. Itu beda
-        // dengan "belum ada template", dan menyamakan keduanya membuat orang
-        // mencari-cari tombol yang memang belum bisa muncul.
-        $tplGagal = true;
-    }
 
     if ($bolehSunting): ?>
       <div class="card">
-        <h2>Buat dari template</h2>
-        <?php if ($tpl): ?>
-          <p class="sub">Titik awal untuk kiriman pertama, saat kebutuhan vendor belum dicentang.
-            Isinya disalin utuh lalu bisa diubah — template tidak ikut berubah.</p>
-          <?php foreach ($tpl as $t):
-            $nilai = (float) (one("SELECT COALESCE(SUM(IF(opsional,0,harga*qty)),0) n
-                                   FROM quote_template_items WHERE template_id = ?", [$t['id']])['n'] ?? 0); ?>
-            <div style="display:flex;gap:13px;align-items:center;justify-content:space-between;
-                        flex-wrap:wrap;padding:13px 0;border-bottom:1px solid var(--ivory-07)">
-              <div style="flex:1;min-width:230px">
-                <b style="color:var(--ivory)"><?= e($t['nama']) ?></b>
-                <?php if ($t['tipe'] !== 'semua'): ?><span class="lab" style="margin-left:7px"><?= e($t['tipe']) ?></span><?php endif; ?>
-                <?php if ($t['deskripsi']): ?><span class="muted" style="display:block;font-size:12.5px;margin-top:2px"><?= e($t['deskripsi']) ?></span><?php endif; ?>
-              </div>
-              <span class="mono" style="font-size:12.5px;color:var(--ivory-60)"><?= $nilai > 0 ? rupiah($nilai, true) : 'Rp 0' ?></span>
-              <div style="display:flex;gap:7px">
-                <?php foreach (['pricelist' => 'Price list', 'penawaran' => 'Penawaran'] as $j => $lbl): ?>
-                  <form method="post" style="display:inline">
-                    <?= csrfField() ?><input type="hidden" name="act" value="buat">
-                    <input type="hidden" name="client_id" value="<?= (int) $c['id'] ?>">
-                    <input type="hidden" name="jenis" value="<?= $j ?>">
-                    <input type="hidden" name="template_id" value="<?= (int) $t['id'] ?>">
-                    <button class="btn sm <?= $j === 'penawaran' ? 'solid' : '' ?>" type="submit"><?= $lbl ?></button>
-                  </form>
-                <?php endforeach; ?>
-              </div>
-            </div>
-          <?php endforeach; ?>
-        <?php elseif ($tplGagal): ?>
-          <p class="sub" style="color:var(--ember)">Tabel template belum ada di database —
-            <b>migration-v20.sql</b> belum dijalankan. Jalankan dulu lewat phpMyAdmin,
-            lalu muat ulang halaman ini.</p>
-        <?php else: ?>
-          <p class="sub">Belum ada template aktif untuk tipe klien ini.
-            <a href="template-penawaran.php" style="color:var(--ember)">Buat satu →</a></p>
+        <h2>Buat price list dari paket</h2>
+        <p class="sub">Isi paket disalin utuh lalu bisa diubah untuk klien ini — paketnya sendiri tidak ikut berubah.
+          <?php if (!empty($c['paket_minat'])): ?>Paket pilihan klien di formulir ditandai <b>★</b>.<?php endif; ?></p>
+        <?php if (!$paket): ?>
+          <p class="sub">Belum ada paket. <a href="paket.php" style="color:var(--ember)">Buat paket →</a></p>
         <?php endif; ?>
-        <p class="hint" style="margin-top:13px">
-          <a href="template-penawaran.php" style="color:var(--ember)">Kelola template →</a>
-        </p>
-      </div>
-
-      <div class="card">
-        <h2>Buat tanpa template</h2>
-        <p class="sub">Barisnya terisi dari jenis vendor dan Top 5 yang sudah dicentang di halaman
-          klien. Cocok setelah konsultasi, saat kebutuhannya sudah jelas. Kalau belum ada yang
-          dicentang, penawarannya lahir kosong.</p>
-        <div style="display:flex;gap:9px;flex-wrap:wrap">
-          <?php foreach (['pricelist' => 'Price list (kiriman awal)', 'penawaran' => 'Penawaran (setelah spesifikasi)'] as $j => $lbl): ?>
-            <form method="post" style="display:inline">
+        <div class="pilih-paket">
+          <?php foreach ($paket as $t): $minat = (int) ($c['paket_minat'] ?? 0) === (int) $t['id']; ?>
+            <form method="post" class="pp<?= $minat ? ' minat' : '' ?>">
               <?= csrfField() ?><input type="hidden" name="act" value="buat">
               <input type="hidden" name="client_id" value="<?= (int) $c['id'] ?>">
-              <input type="hidden" name="jenis" value="<?= $j ?>">
-              <button class="btn" type="submit">+ <?= $lbl ?></button>
+              <input type="hidden" name="template_id" value="<?= (int) $t['id'] ?>">
+              <input type="hidden" name="jenis" value="pricelist">
+              <b><?= $minat ? '★ ' : '' ?><?= e($t['nama']) ?></b>
+              <span class="pp-h"><?= e(paketHargaLabel($t, true) ?: 'harga belum diisi') ?></span>
+              <span class="pp-k"><?= (int) $t['n_isi'] ?> isi<?= !empty($t['tamu']) ? ' · ±' . (int) $t['tamu'] . ' tamu' : '' ?>
+                · <?= !empty($t['tampil_web']) ? 'di situs' : 'internal' ?></span>
+              <button class="btn sm <?= $minat ? 'solid' : '' ?>" type="submit">Pakai paket ini</button>
             </form>
           <?php endforeach; ?>
         </div>
+        <details style="margin-top:14px">
+          <summary class="hint" style="cursor:pointer">Lainnya: dokumen kosong, atau dari kebutuhan vendor klien</summary>
+          <div class="aksi" style="margin-top:10px">
+            <form method="post" style="display:inline"><?= csrfField() ?>
+              <input type="hidden" name="act" value="buat"><input type="hidden" name="client_id" value="<?= (int) $c['id'] ?>">
+              <input type="hidden" name="jenis" value="pricelist"><button class="btn sm ghost" type="submit">+ Price list kosong</button></form>
+            <form method="post" style="display:inline"><?= csrfField() ?>
+              <input type="hidden" name="act" value="buat"><input type="hidden" name="client_id" value="<?= (int) $c['id'] ?>">
+              <input type="hidden" name="jenis" value="penawaran"><input type="hidden" name="sumber" value="kebutuhan">
+              <button class="btn sm ghost" type="submit">+ Penawaran dari kebutuhan vendor</button></form>
+          </div>
+        </details>
       </div>
     <?php endif; ?>
 
     <div class="card">
       <h2>Riwayat <span class="lab" style="margin-left:8px"><?= count($riwayat) ?></span></h2>
       <?php if (!$riwayat): ?>
-        <p class="sub">Belum ada penawaran untuk klien ini.</p>
+        <p class="sub">Belum ada price list untuk klien ini.</p>
       <?php else: ?>
         <table class="tbl">
-          <thead><tr><th>Nomor</th><th>Jenis</th><th>Status</th><th class="num">Kita ajukan</th>
-                     <th class="num">Klien minta</th><th>Tanggal</th><th></th></tr></thead>
+          <thead><tr><th>Nomor</th><th>Paket</th><th>Status</th><th class="num">Total</th><th>Dibuka klien</th><th></th></tr></thead>
           <tbody>
-          <?php foreach ($riwayat as $r): ?>
+          <?php foreach ($riwayat as $r): [$stL, $stC] = statusPenawaran($r['status']); ?>
             <tr>
-              <td data-l="Nomor"><b><?= e($r['nomor']) ?></b><?= $r['revisi'] > 1 ? ' <span class="muted">rev ' . (int) $r['revisi'] . '</span>' : '' ?></td>
-              <td data-l="Jenis"><?= $r['jenis'] === 'pricelist' ? 'Price list' : 'Penawaran' ?></td>
-              <td data-l="Status"><?php [$stL, $stC] = statusPenawaran($r['status']); ?><span class="pill <?= $stC ?>"><?= e($stL) ?></span></td>
-              <td class="num" data-l="Kita ajukan"><?= rupiah((float) $r['total']) ?></td>
-              <td class="num" data-l="Klien minta"><?= !empty($r['nego_nilai']) ? rupiah((float) $r['nego_nilai']) : '—' ?></td>
-              <td class="num" data-l="Tanggal"><?= tanggalID(substr($r['created_at'], 0, 10)) ?></td>
-              <td class="actions"><a class="btn sm" href="?id=<?= (int) $r['id'] ?>">Buka</a></td>
+              <td data-l="Nomor"><b><?= e($r['nomor']) ?></b><?= $r['revisi'] > 1 ? ' <span class="muted">rev ' . (int) $r['revisi'] . '</span>' : '' ?>
+                <br><span class="muted mono" style="font-size:10.5px"><?= $r['jenis'] === 'pricelist' ? 'price list' : 'penawaran' ?></span></td>
+              <td data-l="Paket"><?= e((string) ($r['paket_nama'] ?? '') ?: '—') ?></td>
+              <td data-l="Status"><span class="pill <?= $stC ?>"><?= e($stL) ?></span></td>
+              <td class="num" data-l="Total"><?= (float) $r['total'] > 0 ? rupiah((float) $r['total']) : 'Rp 0' ?></td>
+              <td class="num" data-l="Dibuka klien"><?= $r['seen_at'] ? tanggalID(substr($r['seen_at'], 0, 10)) : '—' ?></td>
+              <td class="actions"><a class="btn sm ghost" target="_blank" href="?id=<?= (int) $r['id'] ?>&pdf=1">PDF</a>
+                <a class="btn sm" href="?id=<?= (int) $r['id'] ?>">Buka</a></td>
             </tr>
           <?php endforeach; ?>
           </tbody>
         </table>
       <?php endif; ?>
     </div>
+    <style>
+    .pilih-paket{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+    .pp{border:1px solid var(--ivory-12);border-radius:12px;padding:13px 14px;display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+    .pp.minat{border-color:var(--ember-line);background:var(--ember-soft)}
+    .pp b{font-size:14.5px;color:var(--ivory)}
+    .pp-h{font-family:var(--serif);font-style:italic;font-size:17px;color:var(--ember)}
+    .pp-k{font-size:12px;color:var(--ivory-38);margin-bottom:6px}
+    </style>
     <?php adminFoot(); exit;
 }
 
 /* ============================================================
-   SATU PENAWARAN
+   SATU DOKUMEN
    ============================================================ */
 if (!$qid) { redirect('admin/klien.php'); }
 
-$qq = one("SELECT q.*, c.name, c.partner_name, c.stage, c.wedding_date, c.venue
-           FROM quotes q JOIN clients c ON c.id = q.client_id WHERE q.id = ?", [$qid]);
-if (!$qq) { http_response_code(404); die('Penawaran tidak ditemukan.'); }
-
+$d = quoteData($qid);
+if (!$d) { http_response_code(404); die('Penawaran tidak ditemukan.'); }
+$qq     = $d['q'];
 $cid    = (int) $qq['client_id'];
-$items  = all("SELECT * FROM quote_items WHERE quote_id = ? ORDER BY sort_order, id", [$qid]);
+$items  = all("SELECT * FROM quote_items WHERE quote_id = ? ORDER BY opsional, sort_order, id", [$qid]);
 $hitung = quoteHitung($qid);
 $lain   = all("SELECT * FROM quotes WHERE client_id = ? ORDER BY id DESC", [$cid]);
 $asal   = !empty($qq['revisi_dari']) ? one("SELECT nomor FROM quotes WHERE id = ?", [$qq['revisi_dari']]) : null;
 $terkunci = in_array($qq['status'], ['cocok', 'tidak_cocok'], true);
+$sunting  = $bolehSunting && !$terkunci;
+$isPL     = $qq['jenis'] === 'pricelist';
+$rp       = fn($n) => (float) $n > 0 ? rupiah((float) $n) : 'Rp 0';
+$kelompokSaran = array_values(array_unique(array_merge(
+    array_filter(array_map(fn($r) => trim((string) ($r['kelompok'] ?? '')), $items)),
+    ['Wedding Organizer', 'Rias & busana', 'Dekorasi', 'Dokumentasi', 'Acara & hiburan', 'Rangkaian adat', 'Venue', 'Konsumsi', 'Undangan & souvenir'])));
 
-adminHead('Penawaran', 'klien');
-// pageHead() meng-escape sendiri. Memanggil e() di sini membuat "&" jadi
-// "&amp;" di layar — nama klien dengan "&" adalah kasus paling umum di sini.
-pageHead($qq['nomor'] . ($qq['revisi'] > 1 ? ' · revisi ' . (int) $qq['revisi'] : ''),
-         $qq['name'] . ($qq['partner_name'] ? ' & ' . $qq['partner_name'] : '')
-       . ($asal ? ' · revisi dari ' . $asal['nomor'] : ''),
-         ($bolehSunting ? '<a class="btn ghost" href="template-penawaran.php">Template</a> ' : '')
+adminHead($d['jenisLbl'], 'klien');
+// pageHead() meng-escape sendiri — jangan panggil e() di sini.
+pageHead($d['jenisLbl'] . ' ' . $qq['nomor'] . ($qq['revisi'] > 1 ? ' · rev ' . (int) $qq['revisi'] : ''),
+         $d['nama'] . ' · ' . stageLabel((string) $qq['stage']) . ($asal ? ' · revisi dari ' . $asal['nomor'] : ''),
+         '<a class="btn ghost" target="_blank" href="?id=' . $qid . '&pdf=1">Lihat PDF ↗</a> '
        . '<a class="btn ghost" href="penawaran.php?client=' . $cid . '">Riwayat</a> '
        . '<a class="btn ghost" href="klien.php?id=' . $cid . '">← Klien</a>');
+[$stL, $stC] = statusPenawaran($qq['status']);
 ?>
 
-<?php
-// rupiah() memakai "—" untuk nol. Itu masuk akal di daftar klien, tapi di
-// editor angka nol harus terbaca sebagai nol — kalau tidak, penawaran yang
-// barisnya belum diisi tampak seperti gagal memuat.
-$rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
-?>
 <div class="grid g4">
-  <div class="stat"><span class="n" style="font-size:22px"><?= $rp($hitung['subtotal']) ?></span><span class="d">Subtotal</span></div>
-  <div class="stat"><span class="n" style="font-size:22px"><?= $rp($hitung['opsional']) ?></span><span class="d">Opsional</span></div>
-  <div class="stat accent"><span class="n" style="font-size:22px"><?= $rp($hitung['total']) ?></span><span class="d">Total diajukan</span></div>
-  <div class="stat"><span class="n" style="font-size:22px"><?= !empty($qq['nego_nilai']) ? rupiah((float) $qq['nego_nilai'], true) : '—' ?></span><span class="d">Diminta klien</span></div>
+  <div class="stat"><span class="n" style="font-size:22px"><?= $rp($hitung['paket']) ?></span><span class="d">Harga paket</span></div>
+  <div class="stat"><span class="n" style="font-size:22px"><?= $rp($hitung['tambahan']) ?></span><span class="d">Tambahan</span></div>
+  <div class="stat accent"><span class="n" style="font-size:22px"><?= $rp($hitung['total']) ?></span><span class="d">Total</span></div>
+  <div class="stat"><span class="n" style="font-size:22px"><?= $hitung['total'] > 0 ? rupiah(round($hitung['total'] * 0.3)) : '—' ?></span><span class="d">DP 30%</span></div>
 </div>
 
 <?php if (!empty($qq['nego_nilai'])): $selisih = (float) $qq['total'] - (float) $qq['nego_nilai']; ?>
-  <div class="card" style="margin-top:18px;border-color:rgba(233,168,92,.45)">
+  <div class="card" style="margin-top:18px;border-color:var(--ember-line)">
     <h2>Tawaran klien</h2>
-    <p class="sub" style="margin-bottom:9px">
-      Kita ajukan <b><?= rupiah((float) $qq['total']) ?></b>, klien minta
-      <b style="color:var(--ember)"><?= rupiah((float) $qq['nego_nilai']) ?></b> —
-      selisih <b><?= rupiah(abs($selisih)) ?></b>
-      (<?= (float) $qq['total'] > 0 ? number_format($selisih / (float) $qq['total'] * 100, 1) : '0' ?>%).
-      Dicatat <?= tanggalID(substr((string) $qq['nego_at'], 0, 10)) ?>.
-    </p>
-    <?php if (trim((string) $qq['nego_catatan']) !== ''): ?>
-      <p style="margin:0;color:var(--ivory)"><?= e($qq['nego_catatan']) ?></p>
-    <?php endif; ?>
+    <p class="sub" style="margin:0">Kita ajukan <b><?= rupiah((float) $qq['total']) ?></b>, klien minta
+      <b style="color:var(--ember)"><?= rupiah((float) $qq['nego_nilai']) ?></b> — selisih <b><?= rupiah(abs($selisih)) ?></b>.
+      <?= trim((string) $qq['nego_catatan']) !== '' ? e($qq['nego_catatan']) : '' ?></p>
   </div>
 <?php endif; ?>
 
-<div class="card">
-  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
-    <h2 style="margin:0">Rincian
-      <?php [$stL, $stC] = statusPenawaran($qq['status']); ?>
-      <span class="pill <?= $stC ?>" style="margin-left:8px"><?= e($stL) ?></span>
-      <span class="lab" style="margin-left:6px"><?= $qq['jenis'] === 'pricelist' ? 'price list' : 'penawaran' ?></span>
-      <?php if ($qq['tipe'] === 'budgeting' && $qq['plafon']): ?>
-        <span class="lab" style="margin-left:6px">plafon <?= rupiah((float) $qq['plafon'], true) ?></span>
-      <?php endif; ?>
-    </h2>
-    <div style="display:flex;gap:9px;align-items:center">
-      <?php if (!empty($qq['template_id'])):
-        $tplAsal = one("SELECT nama FROM quote_templates WHERE id = ?", [$qq['template_id']]); ?>
-        <span class="lab" title="Isi sudah disalin — mengubah template tidak mengubah penawaran ini">
-          dari template: <?= e($tplAsal['nama'] ?? '(terhapus)') ?></span>
-      <?php endif; ?>
-      <a class="btn sm" href="?id=<?= $qid ?>&cetak=1" target="_blank">Lihat / cetak PDF →</a>
-    </div>
+<form method="post" id="fDok" class="card" style="margin-top:18px">
+  <?= csrfField() ?><input type="hidden" name="act" value="simpan"><input type="hidden" name="id" value="<?= $qid ?>">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h2 style="margin:0">Isi dokumen <span class="pill <?= $stC ?>" style="margin-left:8px"><?= e($stL) ?></span></h2>
+    <?php if (!empty($qq['template_id'])): $tplAsal = one("SELECT nama FROM quote_templates WHERE id = ?", [$qq['template_id']]); ?>
+      <span class="lab">dari paket: <?= e($tplAsal['nama'] ?? '(terhapus)') ?></span>
+    <?php endif; ?>
   </div>
-
   <?php if ($terkunci): ?>
-    <p class="sub" style="color:var(--ember)">Penawaran ini sudah diputus, jadi terkunci.
-      Untuk mengubah angkanya, buat revisi baru — dokumen yang sudah dipegang klien tidak boleh berubah isinya.</p>
+    <p class="sub" style="color:var(--ember)">Sudah diputus, jadi terkunci. Untuk mengubah isinya, buat revisi.</p>
   <?php elseif (!$bolehSunting): ?>
-    <p class="sub" style="color:var(--ember)">Kamu bisa membaca riwayatnya, tapi angkanya disusun admin early.</p>
+    <p class="sub" style="color:var(--ember)">Kamu bisa membaca isinya; angkanya disusun admin early.</p>
   <?php endif; ?>
 
-  <form method="post">
-    <?= csrfField() ?><input type="hidden" name="act" value="item_simpan">
-    <input type="hidden" name="id" value="<?= $qid ?>">
+  <fieldset <?= $sunting ? '' : 'disabled' ?> style="border:0;padding:0;margin:14px 0 0">
+    <div class="row c3">
+      <div class="field"><label>Jenis</label>
+        <select name="jenis"><option value="pricelist" <?= $isPL ? 'selected' : '' ?>>Price list</option>
+          <option value="penawaran" <?= !$isPL ? 'selected' : '' ?>>Penawaran</option></select></div>
+      <div class="field"><label>Nama paket</label><input type="text" name="paket_nama" value="<?= e((string) $qq['paket_nama']) ?>" placeholder="kosongkan kalau bukan paket"></div>
+      <div class="field"><label>Harga paket (Rp)</label><input type="text" class="uang" inputmode="numeric" name="paket_harga"
+             value="<?= (float) $qq['paket_harga'] > 0 ? number_format((float) $qq['paket_harga'], 0, ',', '.') : '' ?>"></div>
+    </div>
 
-    <div style="overflow-x:auto">
-      <table class="tbl" style="min-width:760px">
-        <thead><tr>
-          <th style="width:34%">Uraian</th><th style="width:26%">Detail</th>
-          <th style="width:9%">Qty</th><th style="width:9%">Satuan</th>
-          <th style="width:15%" class="num">Harga <span style="opacity:.5">(Rp)</span></th><th style="width:7%">Opsi</th><th></th>
-        </tr></thead>
+    <div id="rincian" style="overflow-x:auto;margin-top:6px">
+      <datalist id="kelList"><?php foreach ($kelompokSaran as $k): ?><option value="<?= e($k) ?>"><?php endforeach; ?></datalist>
+      <table class="tbl" style="min-width:880px">
+        <thead><tr><th style="width:15%">Kelompok</th><th style="width:22%">Isi / uraian</th><th style="width:22%">Keterangan</th>
+          <th style="width:7%">Qty</th><th style="width:9%">Satuan</th><th style="width:13%" class="num">Harga</th><th style="width:6%">Opsi</th><th></th></tr></thead>
         <tbody>
-        <?php $sunting = $bolehSunting && !$terkunci; foreach ($items as $i => $it): ?>
-          <tr>
-            <td><input type="text" name="item[<?= (int) $it['id'] ?>][label]" value="<?= e($it['label']) ?>" <?= $sunting ? '' : 'disabled' ?>>
-                <input type="hidden" name="item[<?= (int) $it['id'] ?>][sort]" value="<?= $i * 10 ?>"></td>
-            <td><input type="text" name="item[<?= (int) $it['id'] ?>][detail]" value="<?= e($it['detail']) ?>" <?= $sunting ? '' : 'disabled' ?>></td>
-            <td><input type="number" step="0.5" min="0.5" name="item[<?= (int) $it['id'] ?>][qty]" value="<?= rtrim(rtrim(number_format((float) $it['qty'], 2, '.', ''), '0'), '.') ?>" <?= $sunting ? '' : 'disabled' ?>></td>
-            <td><input type="text" name="item[<?= (int) $it['id'] ?>][satuan]" value="<?= e($it['satuan']) ?>" <?= $sunting ? '' : 'disabled' ?>></td>
-            <td><input type="text" inputmode="numeric" class="uang"
-                   name="item[<?= (int) $it['id'] ?>][harga]"
-                   value="<?= number_format((float) $it['harga'], 0, ',', '.') ?>" <?= $sunting ? '' : 'disabled' ?>></td>
-            <td style="text-align:center"><input type="checkbox" name="item[<?= (int) $it['id'] ?>][opsional]" value="1" <?= $it['opsional'] ? 'checked' : '' ?> <?= $sunting ? '' : 'disabled' ?>
-                   title="Opsional tidak masuk total"></td>
-            <td class="actions">
-              <?php if ($sunting): ?>
-                <button class="btn sm ghost danger" type="submit" form="hapus<?= (int) $it['id'] ?>">×</button>
-              <?php endif; ?>
-            </td>
+        <?php foreach ($items as $i => $it): $k = (int) $it['id']; ?>
+          <tr class="<?= $it['opsional'] ? 'baris-opsi' : ((float) $it['harga'] > 0 ? 'baris-tambah' : '') ?>">
+            <td><input type="text" name="item[<?= $k ?>][kelompok]" value="<?= e((string) $it['kelompok']) ?>" list="kelList">
+                <input type="hidden" name="item[<?= $k ?>][sort]" value="<?= ($i + 1) * 10 ?>"></td>
+            <td><input type="text" name="item[<?= $k ?>][label]" value="<?= e($it['label']) ?>"></td>
+            <td><input type="text" name="item[<?= $k ?>][detail]" value="<?= e($it['detail']) ?>"></td>
+            <td><input type="text" inputmode="decimal" name="item[<?= $k ?>][qty]" value="<?= rtrim(rtrim(number_format((float) $it['qty'], 2, '.', ''), '0'), '.') ?>"></td>
+            <td><input type="text" name="item[<?= $k ?>][satuan]" value="<?= e($it['satuan']) ?>"></td>
+            <td><input type="text" class="uang" inputmode="numeric" name="item[<?= $k ?>][harga]"
+                       value="<?= (float) $it['harga'] > 0 ? number_format((float) $it['harga'], 0, ',', '.') : '' ?>" placeholder="termasuk"></td>
+            <td style="text-align:center"><input type="checkbox" name="item[<?= $k ?>][opsional]" value="1" <?= $it['opsional'] ? 'checked' : '' ?> title="Opsional: di luar total"></td>
+            <td class="actions"><?php if ($sunting): ?><button class="btn sm ghost danger" type="submit" form="h<?= $k ?>">×</button><?php endif; ?></td>
           </tr>
         <?php endforeach; ?>
-        <?php if (!$items): ?>
-          <tr><td colspan="7" class="sub" style="padding:18px">Belum ada baris. Kebutuhan vendor di halaman klien
-            belum dicentang saat penawaran ini dibuat — tambahkan manual di bawah.</td></tr>
-        <?php endif; ?>
+        <?php if (!$items): ?><tr><td colspan="8" class="sub" style="padding:16px">Belum ada baris.</td></tr><?php endif; ?>
         </tbody>
       </table>
     </div>
+    <p class="hint">Harga <b>kosong</b> = termasuk paket (tampil tanpa harga). Harga <b>diisi</b> = tambahan yang masuk total.
+      Centang <b>Opsi</b> = tawaran tambahan di luar total. Judul dikosongkan = baris dihapus saat simpan.</p>
 
-    <?php if ($sunting): ?>
-      <div class="row c2" style="margin-top:16px">
-        <div class="field"><label>Diskon (Rp)</label>
-          <input type="text" inputmode="numeric" class="uang" name="diskon"
-                 value="<?= number_format((float) $qq['diskon'], 0, ',', '.') ?>">
-          <p class="hint" style="margin:6px 0 0">Dipotong dari subtotal. Item opsional tidak ikut dihitung.</p></div>
-        <div class="field"><label>Berlaku sampai</label>
-          <input type="date" name="valid_until" value="<?= e((string) $qq['valid_until']) ?>"></div>
-      </div>
-      <div class="field"><label>Catatan di penawaran</label>
-        <textarea name="catatan" rows="3" placeholder="Syarat, cakupan, hal yang tidak termasuk…"><?= e((string) $qq['catatan']) ?></textarea></div>
-
-      <div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:6px">
-        <button class="btn solid" type="submit">Simpan penawaran</button>
-        <button class="btn ghost" type="submit" form="tambah">+ Tambah baris</button>
-      </div>
-    <?php endif; ?>
-  </form>
+    <div class="row c3" style="margin-top:12px">
+      <div class="field"><label>Potongan (Rp)</label><input type="text" class="uang" inputmode="numeric" name="diskon" value="<?= (float) $qq['diskon'] > 0 ? number_format((float) $qq['diskon'], 0, ',', '.') : '' ?>"></div>
+      <div class="field"><label>Berlaku sampai</label><input type="date" name="valid_until" value="<?= e((string) $qq['valid_until']) ?>"></div>
+      <div></div>
+    </div>
+    <div class="field"><label>Catatan & ketentuan (satu baris = satu butir di PDF)</label>
+      <textarea name="catatan" rows="5"><?= e((string) $qq['catatan']) ?></textarea></div>
+  </fieldset>
 
   <?php if ($sunting): ?>
-    <form method="post" id="tambah"><?= csrfField() ?>
-      <input type="hidden" name="act" value="item_tambah"><input type="hidden" name="id" value="<?= $qid ?>"></form>
-    <?php foreach ($items as $it): ?>
-      <form method="post" id="hapus<?= (int) $it['id'] ?>"><?= csrfField() ?>
-        <input type="hidden" name="act" value="item_hapus"><input type="hidden" name="id" value="<?= $qid ?>">
-        <input type="hidden" name="item_id" value="<?= (int) $it['id'] ?>"></form>
-    <?php endforeach; ?>
+  <div class="aksi" style="margin-top:8px">
+    <button class="btn solid" type="submit">Simpan</button>
+    <button class="btn ghost" type="submit" form="bIsi">+ Isi paket</button>
+    <button class="btn ghost" type="submit" form="bTambah">+ Tambahan berbayar</button>
+    <button class="btn ghost" type="submit" form="bOpsi">+ Opsional</button>
+  </div>
   <?php endif; ?>
-</div>
+</form>
+<?php if ($sunting): ?>
+  <form method="post" id="bIsi"><?= csrfField() ?><input type="hidden" name="act" value="baris"><input type="hidden" name="id" value="<?= $qid ?>"><input type="hidden" name="jenis_baris" value="isi"></form>
+  <form method="post" id="bTambah"><?= csrfField() ?><input type="hidden" name="act" value="baris"><input type="hidden" name="id" value="<?= $qid ?>"><input type="hidden" name="jenis_baris" value="tambahan"></form>
+  <form method="post" id="bOpsi"><?= csrfField() ?><input type="hidden" name="act" value="baris"><input type="hidden" name="id" value="<?= $qid ?>"><input type="hidden" name="jenis_baris" value="opsi"></form>
+  <?php foreach ($items as $it): ?>
+    <form method="post" id="h<?= (int) $it['id'] ?>"><?= csrfField() ?><input type="hidden" name="act" value="hapus_baris">
+      <input type="hidden" name="id" value="<?= $qid ?>"><input type="hidden" name="item_id" value="<?= (int) $it['id'] ?>"></form>
+  <?php endforeach; ?>
+<?php endif; ?>
 
 <?php if ($bolehSunting && !$terkunci):
-  $isPL = $qq['jenis'] === 'pricelist';
-  $sudahKirim = !empty($qq['sent_at']); ?>
+  $sudahKirim = !empty($qq['sent_at']);
+  $teks = quoteTeksWA($qid);
+  $noKlien = waNomor((string) $qq['phone']); ?>
 <div class="langkah" style="margin-top:18px">
   <div class="langkah-no <?= $sudahKirim ? 'ok' : 'now' ?>">1</div>
   <div class="card" style="margin:0">
     <h2>Kirim ke klien</h2>
-    <p class="sub">Teks WhatsApp dirangkai dari isi <?= $isPL ? 'price list' : 'penawaran' ?> ini, lengkap
-      dengan tautan rincian yang bisa dibuka klien tanpa login.
-      <?= $sudahKirim ? '' : 'Begitu ditandai terkirim, tahap klien maju ke <b>' . ($isPL ? 'Price list' : 'Penawaran') . '</b>.' ?></p>
-    <details style="margin-bottom:13px">
-      <summary class="btn sm ghost" style="list-style:none">Lihat teksnya</summary>
-      <textarea rows="9" readonly id="teksWa" style="margin-top:9px;font-family:var(--mono);font-size:12px"><?= e(quoteTeksWA($qid)) ?></textarea>
-      <button type="button" class="btn sm ghost" style="margin-top:8px" id="salinWa">Salin teks</button>
-    </details>
-    <form method="post" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center"
-          <?= (float) $hitung['total'] <= 0 ? 'onsubmit="return confirm(\'Totalnya masih Rp 0 — harga belum diisi. Tetap tandai terkirim?\')"' : '' ?>>
-      <?= csrfField() ?><input type="hidden" name="act" value="kirim"><input type="hidden" name="id" value="<?= $qid ?>">
+    <p class="sub">PDF <?= $isPL ? 'price list' : 'penawaran' ?> + ringkasan di chat.
+      <?= $sudahKirim ? 'Terkirim ' . e(tanggalID(substr($qq['sent_at'], 0, 10))) . ($qq['seen_at'] ? ' · <span style="color:var(--sage)">sudah dibuka klien</span>' : ' · belum dibuka klien') . '.'
+                      : 'Begitu terkirim, tahap klien maju ke <b>Price list terkirim</b>.' ?></p>
+    <?php if ($hitung['total'] <= 0): ?>
+      <p class="hint" style="color:var(--ember);margin:0 0 10px">Totalnya masih Rp 0 — klien akan menerima "harga dikonfirmasi admin".</p>
+    <?php endif; ?>
+    <div class="aksi">
       <?php if (waSiap()): ?>
-        <label style="display:flex;gap:8px;align-items:center;font-size:13.5px;margin:0">
-          <input type="checkbox" name="via_wa" value="1"> Kirim otomatis lewat WhatsApp
-        </label>
+        <form method="post" style="display:inline" onsubmit="return confirm('Kirim lewat WhatsApp ke <?= e(waTampil($noKlien)) ?> beserta PDF-nya?')">
+          <?= csrfField() ?><input type="hidden" name="act" value="kirim"><input type="hidden" name="id" value="<?= $qid ?>">
+          <input type="hidden" name="via_wa" value="1">
+          <button class="btn solid" type="submit" <?= $noKlien ? '' : 'disabled title="Nomor WA klien kosong"' ?>>Kirim PDF lewat WhatsApp</button></form>
       <?php endif; ?>
-      <button class="btn <?= $sudahKirim ? '' : 'solid' ?>" type="submit"><?= $sudahKirim ? 'Tandai terkirim lagi' : 'Tandai terkirim' ?></button>
-      <?php if ($sudahKirim): ?>
-        <span class="hint" style="margin:0">Terkirim <?= tanggalID(substr($qq['sent_at'], 0, 10)) ?>.</span>
+      <a class="btn <?= waSiap() ? 'ghost' : 'solid' ?>" href="?id=<?= $qid ?>&pdf=1&unduh=1">Unduh PDF</a>
+      <?php if ($noKlien): ?>
+        <a class="btn ghost" target="_blank" rel="noopener" href="https://wa.me/<?= e($noKlien) ?>?text=<?= rawurlencode($teks) ?>">Buka WhatsApp klien ↗</a>
       <?php endif; ?>
-    </form>
+      <form method="post" style="display:inline"><?= csrfField() ?>
+        <input type="hidden" name="act" value="kirim"><input type="hidden" name="id" value="<?= $qid ?>">
+        <button class="btn ghost" type="submit"><?= $sudahKirim ? 'Tandai terkirim lagi' : 'Sudah saya kirim manual' ?></button></form>
+    </div>
+    <details style="margin-top:12px">
+      <summary class="hint" style="cursor:pointer">Lihat / salin teks pesan</summary>
+      <textarea rows="10" readonly id="teksWa" style="margin-top:8px;font-family:var(--mono);font-size:12px"><?= e($teks) ?></textarea>
+      <button type="button" class="btn sm ghost" style="margin-top:6px" id="salinWa">Salin teks</button>
+    </details>
+    <?php if (!waSiap()): ?>
+      <p class="hint" style="margin-top:10px">Kirim manual: unduh PDF, buka WhatsApp klien, lampirkan PDF-nya, lalu tekan "Sudah saya kirim manual".
+        Pengiriman otomatis aktif setelah WhatsApp diatur di <a href="integrasi.php#wa" style="color:var(--ember)">Integrasi</a>.</p>
+    <?php endif; ?>
   </div>
 </div>
 
@@ -691,18 +496,13 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
   <div class="langkah-no <?= $sudahKirim ? 'now' : '' ?>">2</div>
   <div class="card" style="margin:0">
     <h2>Tanggapan klien</h2>
-    <p class="sub">Pilih salah satu. <?= $isPL
-      ? 'Price list yang <b>cocok</b> membawa klien ke tahap Spesifikasi — belum deal.'
-      : 'Penawaran yang <b>disetujui</b> menjadikan klien deal: nilai deal, termin, dan event disusun otomatis.' ?></p>
-
     <div class="pilih3">
-      <form method="post" class="pilih" onsubmit="return confirm(<?= e(json_encode($isPL ? 'Klien cocok dengan price list ini? Klien lanjut ke tahap Spesifikasi.' : 'Klien setuju penawaran ini? Klien menjadi DEAL dan diserahkan ke admin office.')) ?>)">
+      <form method="post" class="pilih" onsubmit="return confirm('Klien cocok? Tahap jadi Menunggu DP dan DP 30% (<?= e(rupiah(round($hitung['total'] * 0.3))) ?>) ditagih.')">
         <?= csrfField() ?><input type="hidden" name="act" value="cocok"><input type="hidden" name="id" value="<?= $qid ?>">
-        <b><?= $isPL ? 'Cocok' : 'Setuju — deal' ?></b>
-        <span><?= $isPL ? 'Lanjut gali spesifikasi & konsultasi.' : 'Total ' . e($rp($hitung['total'])) . ' jadi nilai kontrak.' ?></span>
-        <button class="btn solid sm" type="submit"><?= $isPL ? 'Klien cocok →' : 'Tandai deal →' ?></button>
+        <b>Cocok</b>
+        <span>Lanjut tagih DP 30%<?= $hitung['total'] > 0 ? ' — ' . e(rupiah(round($hitung['total'] * 0.3))) : '' ?>. Setelah DP masuk, klien diserahkan ke admin office.</span>
+        <button class="btn solid sm" type="submit">Klien cocok → tagih DP</button>
       </form>
-
       <div class="pilih">
         <b>Menawar / minta ubah</b>
         <span>Catat angka yang diminta, lalu buat revisi.</span>
@@ -711,12 +511,8 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
           <form method="post" style="margin-top:10px">
             <?= csrfField() ?><input type="hidden" name="act" value="nego"><input type="hidden" name="id" value="<?= $qid ?>">
             <div class="field"><label>Angka yang diminta (Rp)</label>
-              <input type="text" inputmode="numeric" class="uang" name="nego_nilai"
-                     value="<?= !empty($qq['nego_nilai']) ? number_format((float) $qq['nego_nilai'], 0, ',', '.') : '' ?>"
-                     placeholder="35.000.000"></div>
-            <div class="field"><label>Alasannya</label>
-              <input type="text" name="nego_catatan" value="<?= e((string) ($qq['nego_catatan'] ?? '')) ?>"
-                     placeholder="Budget dari orang tua, dekorasi terlalu ramai…"></div>
+              <input type="text" inputmode="numeric" class="uang" name="nego_nilai" value="<?= !empty($qq['nego_nilai']) ? number_format((float) $qq['nego_nilai'], 0, ',', '.') : '' ?>"></div>
+            <div class="field"><label>Alasannya</label><input type="text" name="nego_catatan" value="<?= e((string) ($qq['nego_catatan'] ?? '')) ?>"></div>
             <button class="btn sm" type="submit">Simpan tawaran</button>
           </form>
         </details>
@@ -724,7 +520,6 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
           <input type="hidden" name="act" value="revisi"><input type="hidden" name="id" value="<?= $qid ?>">
           <button class="btn sm ghost" type="submit">Buat revisi →</button></form>
       </div>
-
       <div class="pilih">
         <b>Tidak cocok — mundur</b>
         <span>Klien tidak lanjut. Pindah ke arsip, sebabnya dicatat di Analisa.</span>
@@ -732,8 +527,7 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
           <summary class="btn sm ghost danger" style="list-style:none">Catat tidak cocok</summary>
           <form method="post" style="margin-top:10px"><?= csrfField() ?>
             <input type="hidden" name="act" value="tidak_cocok"><input type="hidden" name="id" value="<?= $qid ?>">
-            <div class="field"><label>Alasan (wajib)</label>
-              <input type="text" name="alasan" required placeholder="Ambil WO lain, budget tidak ketemu…"></div>
+            <div class="field"><label>Alasan (wajib)</label><input type="text" name="alasan" required placeholder="Ambil WO lain, budget tidak ketemu…"></div>
             <button class="btn sm danger" type="submit">Catat &amp; tutup klien</button>
           </form>
         </details>
@@ -744,24 +538,20 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
 <?php endif; ?>
 
 <div class="card">
-  <h2>Riwayat penawaran klien ini</h2>
-  <p class="sub">Termasuk yang sudah tidak berlaku. Admin office membaca ini untuk tahu
-    apa yang sudah dijanjikan dan apa yang dikorbankan saat menawar.</p>
+  <h2>Riwayat dokumen klien ini</h2>
   <table class="tbl">
-    <thead><tr><th>Nomor</th><th>Status</th><th class="num">Kita ajukan</th><th class="num">Klien minta</th><th>Tanggal</th><th></th></tr></thead>
+    <thead><tr><th>Nomor</th><th>Paket</th><th>Status</th><th class="num">Total</th><th class="num">Klien minta</th><th></th></tr></thead>
     <tbody>
-    <?php foreach ($lain as $r): ?>
+    <?php foreach ($lain as $r): [$sl, $sc] = statusPenawaran($r['status']); ?>
       <tr style="<?= (int) $r['id'] === $qid ? 'background:var(--ivory-07)' : '' ?>">
         <td data-l="Nomor"><b><?= e($r['nomor']) ?></b><?= $r['revisi'] > 1 ? ' <span class="muted">rev ' . (int) $r['revisi'] . '</span>' : '' ?>
           <br><span class="muted mono" style="font-size:10.5px"><?= $r['jenis'] === 'pricelist' ? 'price list' : 'penawaran' ?></span></td>
-        <td data-l="Status"><?php [$stL, $stC] = statusPenawaran($r['status']); ?><span class="pill <?= $stC ?>"><?= e($stL) ?></span></td>
-        <td class="num" data-l="Kita ajukan"><?= rupiah((float) $r['total']) ?></td>
+        <td data-l="Paket"><?= e((string) ($r['paket_nama'] ?? '') ?: '—') ?></td>
+        <td data-l="Status"><span class="pill <?= $sc ?>"><?= e($sl) ?></span></td>
+        <td class="num" data-l="Total"><?= (float) $r['total'] > 0 ? rupiah((float) $r['total']) : 'Rp 0' ?></td>
         <td class="num" data-l="Klien minta"><?= !empty($r['nego_nilai']) ? rupiah((float) $r['nego_nilai']) : '—' ?></td>
-        <td class="num" data-l="Tanggal"><?= tanggalID(substr($r['created_at'], 0, 10)) ?></td>
-        <td class="actions">
-          <a class="btn sm ghost" href="?id=<?= (int) $r['id'] ?>&cetak=1" target="_blank">PDF</a>
-          <?php if ((int) $r['id'] !== $qid): ?><a class="btn sm" href="?id=<?= (int) $r['id'] ?>">Buka</a><?php endif; ?>
-        </td>
+        <td class="actions"><a class="btn sm ghost" target="_blank" href="?id=<?= (int) $r['id'] ?>&pdf=1">PDF</a>
+          <?php if ((int) $r['id'] !== $qid): ?><a class="btn sm" href="?id=<?= (int) $r['id'] ?>">Buka</a><?php endif; ?></td>
       </tr>
     <?php endforeach; ?>
     </tbody>
@@ -769,53 +559,25 @@ $rp = fn($n) => (float) $n > 0 ? rupiah((float) $n, true) : 'Rp 0';
 </div>
 
 <style>
-/* Awalan Rp menempel di dalam kotak, bukan cuma di label. Saat menyunting
-   sepuluh baris harga, label di atas kotak sudah lepas dari pandangan —
-   yang terlihat cuma deretan angka telanjang. */
-.rp { position: relative; display: block }
-/* Kotak angka: rata kanan, lebar digit seragam. Tanpa awalan Rp yang
-   ditumpuk di dalam kotak — satuannya sudah disebut sekali di kepala kolom,
-   dan overlay di atas input selalu bermasalah begitu fontnya belum termuat
-   atau kotaknya menyempit. */
-input.uang {
-  text-align: right;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: .3px;
-}
-input.uang:disabled { opacity: .55 }
+input.uang{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:.3px}
+fieldset:disabled input, fieldset:disabled select, fieldset:disabled textarea{opacity:.65}
+tr.baris-opsi td{background:var(--ivory-07)}
+tr.baris-tambah td:nth-child(6) input{border-color:var(--ember-line)}
 </style>
-
 <script>
-/* Pemisah ribuan hidup saat mengetik.
-   Tanpa ini, "20000000000" dan "2000000000" terlihat nyaris sama di layar —
-   dan selisihnya sepuluh kali lipat. Untuk angka pernikahan yang rutin
-   menyentuh ratusan juta, itu salah ketik yang mahal dan sulit terlihat.
-   Server tetap membersihkan titiknya sendiri, jadi ini murni bantuan baca. */
-(function () {
-  const fmt = v => {
-    const angka = String(v).replace(/\D/g, '').replace(/^0+(?=\d)/, '');
-    return angka ? angka.replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
-  };
-  document.querySelectorAll('input.uang').forEach(el => {
-    el.addEventListener('input', () => {
-      // Hitung angka sebelum kursor supaya posisinya tidak melompat ke ujung
-      // setiap kali titik baru disisipkan.
-      const sebelum = el.value.slice(0, el.selectionStart).replace(/\D/g, '').length;
-      el.value = fmt(el.value);
-      let pos = 0, n = 0;
-      while (pos < el.value.length && n < sebelum) { if (/\d/.test(el.value[pos])) n++; pos++; }
-      el.setSelectionRange(pos, pos);
-    });
-    el.addEventListener('blur', () => { if (el.value.trim() === '') el.value = '0'; });
+(() => {
+  const fmt = v => { const a = String(v).replace(/\D/g, '').replace(/^0+(?=\d)/, ''); return a ? a.replace(/\B(?=(\d{3})+(?!\d))/g, '.') : ''; };
+  document.querySelectorAll('input.uang').forEach(el => el.addEventListener('input', () => { el.value = fmt(el.value); }));
+  document.getElementById('salinWa')?.addEventListener('click', async e => {
+    try { await navigator.clipboard.writeText(document.getElementById('teksWa').value);
+          e.target.textContent = 'Tersalin'; setTimeout(() => e.target.textContent = 'Salin teks', 1600); } catch (_) {}
   });
+  // Menambah baris lewat tombol terpisah membuang ketikan yang belum disimpan.
+  const f = document.getElementById('fDok'); let ubah = false;
+  f?.addEventListener('input', () => { ubah = true; }); f?.addEventListener('submit', () => { ubah = false; });
+  ['bIsi', 'bTambah', 'bOpsi'].forEach(id => document.getElementById(id)?.addEventListener('submit', e => {
+    if (ubah && !confirm('Ada perubahan yang belum disimpan. Lanjut tanpa menyimpan?')) e.preventDefault();
+  }));
 })();
-</script>
-
-<script>
-document.getElementById('salinWa')?.addEventListener('click', async e => {
-  try { await navigator.clipboard.writeText(document.getElementById('teksWa').value);
-        e.target.textContent = 'Tersalin'; setTimeout(() => e.target.textContent = 'Salin teks', 1600); } catch (_) {}
-});
 </script>
 <?php adminFoot();

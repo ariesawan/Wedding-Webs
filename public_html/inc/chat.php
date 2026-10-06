@@ -329,16 +329,20 @@ function chatKirim(int $chatId, string $teks, ?int $userId = null, array $opt = 
 
     $pesta = $opt['client_id'] ?? chatPestaAktif($chatId);
 
+    $berkas = $opt['berkas'] ?? null;
     $mid = chatSimpan($chatId, [
-        'direction' => 'keluar',
-        'channel'   => 'wa',
-        'body'      => $teks,
-        'client_id' => $pesta,
-        'vendor_id' => $ch['vendor_id'],
-        'wa_from'   => $ch['wa_number'],
-        'user_id'   => $userId,
-        'wa_status' => waSiap() ? 'antre' : 'lokal',
-        'reply_to'  => $opt['reply_to'] ?? null,
+        'direction'  => 'keluar',
+        'channel'    => 'wa',
+        'body'       => $teks,
+        'client_id'  => $pesta,
+        'vendor_id'  => $ch['vendor_id'],
+        'wa_from'    => $ch['wa_number'],
+        'user_id'    => $userId,
+        'wa_status'  => waSiap() ? 'antre' : 'lokal',
+        'reply_to'   => $opt['reply_to'] ?? null,
+        'media_url'  => $berkas['url'] ?? null,
+        'media_name' => $berkas['nama'] ?? null,
+        'media_type' => $berkas ? 'application/pdf' : null,
     ]);
 
     if (!waSiap()) {
@@ -347,7 +351,7 @@ function chatKirim(int $chatId, string $teks, ?int $userId = null, array $opt = 
                 'wa_url' => 'https://wa.me/' . $ch['wa_number'] . '?text=' . rawurlencode($teks)];
     }
 
-    $r = waKirim($ch['wa_number'], $teks);
+    $r = waKirim($ch['wa_number'], $teks, $berkas);
     if ($r['ok']) {
         q("UPDATE wa_messages SET wa_status='terkirim', wa_id=?, sent_at=NOW() WHERE id=?",
           [$r['id'], $mid]);

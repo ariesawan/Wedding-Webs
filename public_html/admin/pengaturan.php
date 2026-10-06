@@ -4,7 +4,8 @@ $user = requireLogin();
 
 $keys = ['site_name','site_description','contact_email','wa_number','ig_url','fb_url','tiktok_url','youtube_url',
          'address_street','address_city','address_region','address_zip','area_served','price_range',
-         'default_og_image','meeting_duration','ga_measurement_id','gsc_verification'];
+         'default_og_image','meeting_duration','ga_measurement_id','gsc_verification',
+         'site_tagline','wa_admin_biasa','wa_admin_office','bank_nama','bank_norek','bank_atasnama'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrfCheck();
@@ -41,15 +42,33 @@ pageHead('Pengaturan', 'Identitas bisnis di sini dipakai untuk data terstruktur 
         <p class="hint">Dipakai sebagai meta description beranda. Ideal 120–158 karakter.</p></div>
       <div class="row c2">
         <div class="field"><label for="ce">Email kontak</label><input type="email" id="ce" name="contact_email" value="<?= $s('contact_email') ?>"></div>
-        <div class="field"><label for="wa">Nomor WhatsApp</label><input type="text" id="wa" name="wa_number" value="<?= $s('wa_number') ?>" placeholder="6281234567890">
-          <p class="hint">Format internasional tanpa tanda +.</p></div>
+        <div class="field"><label for="wa">Nomor WhatsApp utama</label><input type="text" id="wa" name="wa_number" value="<?= $s('wa_number') === '6281234567890' ? '' : $s('wa_number') ?>" placeholder="62812…">
+          <p class="hint">Dipakai tombol WhatsApp di formulir dan price list. Format 62…, tanpa tanda +.
+            <?php if (setting('wa_number') === '6281234567890'): ?><b style="color:var(--rose)">Masih berisi nomor contoh — isi nomor yang benar.</b><?php endif; ?></p></div>
       </div>
+      <div class="field"><label for="tg">Tagline (kop PDF)</label><input type="text" id="tg" name="site_tagline" value="<?= $s('site_tagline', 'Wedding Organizer · Yogyakarta') ?>"></div>
       <div class="field"><label for="og">Gambar OG bawaan</label><input type="url" id="og" name="default_og_image" value="<?= $s('default_og_image') ?>" placeholder="<?= e(url('foto/dream-come-true.jpg')) ?>">
         <p class="hint">Muncul saat tautan situs dibagikan di WhatsApp atau media sosial. Ukuran ideal 1200×630.</p></div>
       <div class="field"><label for="dur">Durasi pertemuan bawaan (menit)</label><input type="number" id="dur" name="meeting_duration" value="<?= $s('meeting_duration', '60') ?>" min="15" step="15"></div>
     </div>
 
     <div>
+      <div class="card">
+        <h2>Price list &amp; pembayaran</h2>
+        <p class="sub">Tercetak di PDF price list dan teks WhatsApp yang dikirim ke klien.</p>
+        <div class="row c2">
+          <div class="field"><label for="wab">WA admin early</label><input type="text" id="wab" name="wa_admin_biasa" value="<?= $s('wa_admin_biasa') ?>" placeholder="62812…">
+            <p class="hint">Kontak di price list sebelum DP.</p></div>
+          <div class="field"><label for="wao">WA admin office</label><input type="text" id="wao" name="wa_admin_office" value="<?= $s('wa_admin_office') ?>" placeholder="62812…">
+            <p class="hint">Kontak setelah DP.</p></div>
+        </div>
+        <div class="row c3">
+          <div class="field"><label for="bn">Bank</label><input type="text" id="bn" name="bank_nama" value="<?= $s('bank_nama') ?>" placeholder="BCA"></div>
+          <div class="field"><label for="br">Nomor rekening</label><input type="text" id="br" name="bank_norek" value="<?= $s('bank_norek') ?>"></div>
+          <div class="field"><label for="ba">Atas nama</label><input type="text" id="ba" name="bank_atasnama" value="<?= $s('bank_atasnama') ?>"></div>
+        </div>
+      </div>
+
       <div class="card">
         <h2>Alamat &amp; jangkauan</h2>
         <div class="field"><label for="as">Jalan</label><input type="text" id="as" name="address_street" value="<?= $s('address_street') ?>"></div>

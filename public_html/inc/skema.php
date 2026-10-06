@@ -26,7 +26,7 @@
  * peringatan — migration-v22.sql tetap bisa dijalankan manual.
  */
 
-const SKEMA_VERSI = 22;
+const SKEMA_VERSI = 23;
 
 function skemaAdaKolom(string $tabel, string $kolom): bool
 {
@@ -117,6 +117,8 @@ function skemaPerbarui(): string
         // mengisinya. Tidak ada kolom baru di sini — cukup dicatat bahwa
         // struktur v22 lengkap.
 
+        skemaV23();
+
         settingSet('skema_versi', (string) SKEMA_VERSI);
         settingSet('skema_galat', '');
         return '';
@@ -129,6 +131,175 @@ function skemaPerbarui(): string
 }
 
 /**
+ * v23 — alur yang disepakati owner (Oktober 2026):
+ *
+ *   admin early : biodata awal → kirim price list (paket) → cocok → DP 30%
+ *   admin office: biodata lengkap & keluarga → dekor, venue, vendor →
+ *                 termin → meeting → persiapan → hari-H
+ *
+ * Yang ditambahkan:
+ *   - tahap 'dp' (Menunggu DP) di antara price list dan deal
+ *   - paket price list yang tampil di situs (memakai quote_templates)
+ *   - penawaran berbentuk "paket + rincian isi"
+ *   - konsep dekor di data acara
+ *   - log SETIAP kiriman formulir publik, termasuk yang gagal, supaya
+ *     tidak ada calon klien yang hilang tanpa jejak
+ */
+function skemaV23(): void
+{
+    // ---- tahap 'dp' ----
+    // ENUM dibaca dulu lalu disisipi, bukan ditulis ulang dari ingatan: nilai
+    // yang terlupa akan diubah MySQL jadi string kosong tanpa peringatan.
+    $kol = one("SELECT COLUMN_TYPE t FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'clients' AND COLUMN_NAME = 'stage'");
+    if ($kol && !str_contains($kol['t'], "'dp'")) {
+        preg_match_all("/'([^']*)'/", $kol['t'], $m);
+        $nilai = $m[1];
+        $pos = array_search('pricelist', $nilai, true);
+        array_splice($nilai, $pos === false ? 1 : $pos + 1, 0, ['dp']);
+        db()->exec("ALTER TABLE clients MODIFY COLUMN stage ENUM('" . implode("','", $nilai) . "') NOT NULL DEFAULT 'baru'");
+    }
+    // Tahap lama 'spesifikasi' dan 'penawaran' tidak lagi dipakai — klien di
+    // sana (bila ada) belum DP, jadi kembali ke pegangan admin early.
+    q("UPDATE clients SET stage = 'pricelist' WHERE stage IN ('spesifikasi','penawaran')");
+
+    skemaTambahKolom('clients', 'paket_minat', "INT UNSIGNED NULL COMMENT 'quote_templates.id yang dipilih klien'");
+
+    // ---- paket price list ----
+    skemaTambahKolom('quote_templates', 'slug',        "VARCHAR(140) NOT NULL DEFAULT ''");
+    skemaTambahKolom('quote_templates', 'ringkas',     "VARCHAR(190) NOT NULL DEFAULT '' COMMENT 'Satu kalimat di bawah nama paket'");
+    skemaTambahKolom('quote_templates', 'harga',       "DECIMAL(14,2) NULL COMMENT 'Harga paket; NULL = belum diisi'");
+    skemaTambahKolom('quote_templates', 'harga_mulai', "TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = ditulis mulai dari'");
+    skemaTambahKolom('quote_templates', 'tamu',        "SMALLINT UNSIGNED NULL COMMENT 'Perkiraan tamu paket'");
+    skemaTambahKolom('quote_templates', 'tampil_web',  "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = tampil di halaman price list'");
+    skemaTambahKolom('quote_templates', 'unggulan',    "TINYINT(1) NOT NULL DEFAULT 0");
+    skemaTambahKolom('quote_template_items', 'kelompok', "VARCHAR(80) NOT NULL DEFAULT '' COMMENT 'Judul kelompok rincian isi'");
+    skemaTambahKolom('quotes', 'paket_nama',  "VARCHAR(120) NOT NULL DEFAULT ''");
+    skemaTambahKolom('quotes', 'paket_harga', "DECIMAL(14,2) NULL");
+    skemaTambahKolom('quote_items', 'kelompok', "VARCHAR(80) NOT NULL DEFAULT ''");
+
+    // ---- konsep dekor ----
+    skemaTambahKolom('client_wedding_info', 'konsep_dekor', "TEXT NULL COMMENT 'Tema, warna, referensi dekor'");
+
+    // ---- log formulir ----
+    db()->exec("CREATE TABLE IF NOT EXISTS `form_masuk` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        `ip` VARCHAR(45) NOT NULL DEFAULT '',
+        `status` ENUM('tersimpan','ulang','galat','ditolak','bot') NOT NULL,
+        `client_id` INT UNSIGNED NULL,
+        `nama` VARCHAR(190) NOT NULL DEFAULT '',
+        `wa` VARCHAR(40) NOT NULL DEFAULT '',
+        `paket` VARCHAR(140) NOT NULL DEFAULT '',
+        `pesan` VARCHAR(400) NOT NULL DEFAULT '',
+        `payload` MEDIUMTEXT NULL,
+        `ditangani` TINYINT(1) NOT NULL DEFAULT 0,
+        PRIMARY KEY (`id`), KEY `idx_form_waktu` (`created_at`), KEY `idx_form_status` (`status`),
+        KEY `idx_form_wa` (`wa`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    skemaBenihPaket();
+}
+
+/**
+ * Paket contoh — KOSONGAN tapi tersusun wajar.
+ *
+ * Isinya diambil dari kalimat yang sudah ada di beranda (tiga susunan hari
+ * Prasaja / Semanak / Sidomukti), harganya sengaja kosong: angka harga hanya
+ * boleh datang dari owner. Selama harga kosong, halaman price list menulis
+ * "harga dikirim lewat WhatsApp", bukan angka karangan.
+ *
+ * Hanya dibuat sekali (dicek lewat slug), jadi menghapus atau mengubahnya
+ * dari panel tidak akan dibatalkan oleh pemeriksaan berikutnya.
+ */
+function skemaBenihPaket(): void
+{
+    if (setting('paket_benih', '') === '1') return;
+
+    $syarat = "Harga berlaku sampai tanggal yang tertulis di atas.\n"
+            . "DP 30% untuk mengunci tanggal; sisa pembayaran mengikuti termin di bawah.\n"
+            . "Vendor dan rincian final disepakati bersama admin office setelah DP.\n"
+            . "Belum termasuk: sewa venue, akomodasi tim untuk acara luar kota, dan perizinan — kecuali tertulis di rincian.";
+
+    $paket = [
+        ['prasaja', 'Prasaja', 'Satu acara. Hening, hangat, rapi — akad atau pemberkatan dengan ramah tamah.', 150, 0, 10, [
+            ['Wedding Organizer', 'Konsultasi & perencanaan acara', ''],
+            ['Wedding Organizer', 'Koordinasi vendor', ''],
+            ['Wedding Organizer', 'Tim hari-H', '±2 kru lapangan + tim inti'],
+            ['Wedding Organizer', 'Rundown acara', ''],
+            ['Rias & busana', 'Make up mempelai', 'Akad / pemberkatan'],
+            ['Rias & busana', 'Busana mempelai', '1 set'],
+            ['Dekorasi', 'Dekorasi akad / pemberkatan', ''],
+            ['Dokumentasi', 'Foto', 'Akad sampai ramah tamah'],
+            ['Konsumsi', 'Manajemen katering', 'Koordinasi vendor katering'],
+        ]],
+        ['semanak', 'Semanak', 'Akad pagi, resepsi malam. Hari penuh di tanggal yang sama.', 400, 1, 20, [
+            ['Wedding Organizer', 'Perencanaan & kurasi vendor', 'Sejak DP sampai hari-H'],
+            ['Wedding Organizer', 'Tim hari-H', '±4 kru lapangan + tim inti'],
+            ['Wedding Organizer', 'Rundown, technical meeting & gladi', ''],
+            ['Rias & busana', 'Make up mempelai', 'Akad & resepsi'],
+            ['Rias & busana', 'Busana mempelai', '2 set — akad & resepsi'],
+            ['Rias & busana', 'Make up keluarga inti', ''],
+            ['Dekorasi', 'Dekorasi akad', ''],
+            ['Dekorasi', 'Dekorasi pelaminan resepsi', 'Termasuk gate & area foto'],
+            ['Dokumentasi', 'Foto & video', 'Akad & resepsi'],
+            ['Acara', 'MC resepsi', ''],
+            ['Acara', 'Kirab pengantin', ''],
+            ['Konsumsi', 'Manajemen katering', 'Koordinasi vendor katering'],
+        ]],
+        ['sidomukti', 'Sidomukti', 'Rangkaian adat penuh, dari H-1 sampai larut malam.', 800, 0, 30, [
+            ['Wedding Organizer', 'Perencanaan penuh', 'Sejak DP sampai hari-H'],
+            ['Wedding Organizer', 'Koordinasi seluruh vendor', ''],
+            ['Wedding Organizer', 'Tim hari-H', '±8 kru lapangan + tim inti, H-1 & hari-H'],
+            ['Wedding Organizer', 'Rundown adat, technical meeting & gladi', ''],
+            ['Rangkaian adat', 'Siraman & midodareni', 'H-1'],
+            ['Rangkaian adat', 'Panggih adat', 'Hari-H'],
+            ['Rias & busana', 'Make up mempelai', 'Siraman sampai resepsi'],
+            ['Rias & busana', 'Busana mempelai & busana adat', ''],
+            ['Rias & busana', 'Make up & busana keluarga inti', ''],
+            ['Dekorasi', 'Dekorasi siraman & akad', ''],
+            ['Dekorasi', 'Dekorasi pelaminan resepsi', 'Termasuk gate & area foto'],
+            ['Dokumentasi', 'Foto & video', 'H-1 sampai resepsi'],
+            ['Acara & hiburan', 'MC & hiburan', ''],
+            ['Acara & hiburan', 'After-party', ''],
+            ['Konsumsi', 'Manajemen katering', 'Koordinasi vendor katering'],
+        ]],
+        // Kerangka internal — tidak tampil di situs. Titik awal untuk paket
+        // atau penawaran khusus: kelompoknya sudah ada, isinya tinggal diganti.
+        ['template-kosong', 'Template kosong — susun sendiri', '', null, 0, 90, [
+            ['Wedding Organizer', 'Koordinasi & tim hari-H', ''],
+            ['Rias & busana', 'Make up mempelai', ''],
+            ['Rias & busana', 'Busana mempelai', ''],
+            ['Rias & busana', 'Make up keluarga inti', ''],
+            ['Rias & busana', 'Make up keluarga besar / panitia', ''],
+            ['Dekorasi', 'Dekorasi pelaminan', ''],
+            ['Dokumentasi', 'Foto & video', ''],
+            ['Acara & hiburan', 'MC', ''],
+            ['Venue', 'Venue', ''],
+            ['Konsumsi', 'Katering', ''],
+            ['Undangan & souvenir', 'Undangan', ''],
+        ]],
+    ];
+
+    foreach ($paket as [$slug, $nama, $ringkas, $tamu, $unggulan, $urutan, $isi]) {
+        if (one("SELECT id FROM quote_templates WHERE slug = ?", [$slug])) continue;
+        $web = $slug === 'template-kosong' ? 0 : 1;
+        q("INSERT INTO quote_templates (nama, slug, ringkas, deskripsi, tipe, catatan_bawaan, urutan,
+                                        is_active, harga, harga_mulai, tamu, tampil_web, unggulan)
+           VALUES (?,?,?,?, 'semua', ?, ?, 1, NULL, 1, ?, ?, ?)",
+          [$nama, $slug, $ringkas,
+           $web ? 'Paket price list di situs. Harga belum diisi — lengkapi dari panel.' : 'Kerangka kosong untuk paket atau penawaran khusus.',
+           $syarat, $urutan, $tamu, $web, $unggulan]);
+        $tid = insertId();
+        foreach ($isi as $i => [$kel, $label, $detail]) {
+            q("INSERT INTO quote_template_items (template_id, kelompok, label, detail, qty, satuan, harga, opsional, sort_order)
+               VALUES (?,?,?,?,1,'paket',0,0,?)", [$tid, $kel, $label, $detail, ($i + 1) * 10]);
+        }
+    }
+    settingSet('paket_benih', '1');
+}
+
+/**
  * Dipanggil dari bootstrap. Hanya bekerja kalau versinya tertinggal, dan
  * paling sering sekali tiap 10 menit kalau terus gagal — supaya hosting
  * yang menolak ALTER tidak dihantam pemeriksaan di setiap halaman.
@@ -136,7 +307,16 @@ function skemaPerbarui(): string
 function skemaPastikan(): void
 {
     try {
-        if ((int) setting('skema_versi', '0') >= SKEMA_VERSI) return;
+        if ((int) setting('skema_versi', '0') >= SKEMA_VERSI) {
+            // Kolom sudah lengkap tapi paket contoh belum ada — terjadi kalau
+            // skema dipasang manual lewat db/migration-v23.sql. Dicoba sekali;
+            // kalau gagal ditandai supaya tidak diulang di setiap halaman.
+            if (setting('paket_benih', '') === '') {
+                try { skemaBenihPaket(); }
+                catch (Throwable $e) { settingSet('paket_benih', 'galat'); error_log('benih paket: ' . $e->getMessage()); }
+            }
+            return;
+        }
         $terakhir = (int) setting('skema_coba_at', '0');
         if ($terakhir && time() - $terakhir < 600 && setting('skema_galat', '') !== '') return;
         settingSet('skema_coba_at', (string) time());

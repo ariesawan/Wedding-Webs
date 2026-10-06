@@ -5,6 +5,7 @@ require_once __DIR__ . '/../inc/vendor.php';
 require_once __DIR__ . '/../inc/chat.php';
 require_once __DIR__ . '/../partials/blok-top5.php';
 require_once __DIR__ . '/../inc/wa.php';
+require_once __DIR__ . '/../inc/penawaran.php';
 $user = requireLogin();
 
 /**
@@ -276,6 +277,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $data['source'] = in_array($_POST['source'], ['instagram','whatsapp','web','referral','vendor','walkin','lainnya'], true)
                                 ? $_POST['source'] : 'lainnya';
             }
+            if ($ada('paket_minat')) {
+                // Paket diminati menunjuk ke paket di menu Paket & price list,
+                // supaya tombol "Kirim price list" bisa langsung memakainya.
+                $pm = (int) $_POST['paket_minat'];
+                $pt = $pm ? one("SELECT id, nama FROM quote_templates WHERE id = ?", [$pm]) : null;
+                $data['paket_minat'] = $pt ? (int) $pt['id'] : null;
+                $data['package']     = $pt ? $pt['nama'] : '';
+            }
             if ($ada('budget_estimate')) $data['budget_estimate'] = $uang('budget_estimate');
             if ($ada('deal_value'))      $data['deal_value']      = $uang('deal_value');
 
@@ -354,6 +363,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $id = insertId();
                 clientLog($id, 'sistem', 'Klien dicatat', 'Sumber: ' . $data['source'], $user['id']);
                 flash('Klien baru dicatat. Langkah berikutnya: kirim price list.');
+                $plLangsung = ($_POST['lanjut'] ?? '') === 'pl';
             }
             simpanBaseInfo($id);
             // Formulir lama yang masih mengirim satu angka tamu.
@@ -362,6 +372,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             // Room chat dibuat/ditautkan di sini, bukan menunggu pesan pertama.
             try { chatSinkronKlien($id); } catch (Throwable $e) { /* gagal sinkron bukan alasan simpan batal */ }
+            // "Simpan & susun price list": langsung ke dokumennya.
+            if (!empty($plLangsung)) {
+                if (!empty($data['paket_minat'])) {
+                    $qid = quoteDariPaket($id, (int) $data['paket_minat'], 'pricelist', (int) $user['id']);
+                    clientLog($id, 'sistem', 'Price list dibuat dari paket', $data['package'], $user['id']);
+                    flash('Klien dicatat dan price list paket "' . $data['package'] . '" disiapkan. Periksa, lalu kirim lewat WhatsApp.');
+                    redirect('admin/penawaran.php?id=' . $qid);
+                }
+                redirect('admin/penawaran.php?client=' . $id);
+            }
             redirect('admin/klien.php?id=' . $id . (isset($_POST['tab']) ? '#' . preg_replace('/[^a-z]/', '', $_POST['tab']) : ''));
         }
 
@@ -405,6 +425,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($baru) clientLog($id, 'catatan', 'Data lengkap mulai diisi', '', $user['id']);
             flash('Data lengkap tersimpan.');
             redirect('admin/klien.php?id=' . $id . '#datalengkap');
+        }
+
+        elseif ($act === 'dp_masuk') {
+            // DP 30% masuk = serah terima ke admin office. Satu tombol, satu
+            // pintu: termin DP ditandai lunas, klien deal, event dibuat.
+            $id = (int) ($_POST['id'] ?? 0);
+            if (!in_array($user['role'] ?? '', ['owner', 'admin_early'], true))
+                throw new RuntimeException('Konfirmasi DP dilakukan admin early atau owner.');
+            $r = dpDiterima($id, (int) $user['id'], (string) ($_POST['tanggal'] ?? ''),
+                            mb_substr(trim((string) ($_POST['metode'] ?? '')), 0, 60));
+            flash($r['dp']['label'] . ' ' . rupiah((float) $r['dp']['amount']) . ' tercatat masuk. '
+                . 'Klien sekarang Deal dan dipegang admin office.'
+                . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
+            redirect('admin/klien.php?id=' . $id);
+        }
+
+        elseif ($act === 'dekor') {
+            $id = (int) ($_POST['id'] ?? 0);
+            if (!one("SELECT id FROM clients WHERE id = ?", [$id])) throw new RuntimeException('Klien tidak ditemukan.');
+            $konsep = mb_substr(trim((string) ($_POST['konsep_dekor'] ?? '')), 0, 8000);
+            q("INSERT INTO client_wedding_info (client_id, konsep_dekor) VALUES (?, ?)
+               ON DUPLICATE KEY UPDATE konsep_dekor = VALUES(konsep_dekor)", [$id, $konsep]);
+            clientLog($id, 'catatan', 'Konsep dekor diperbarui', mb_strimwidth($konsep, 0, 160, '…'), $user['id']);
+            flash('Konsep dekor tersimpan.');
+            redirect('admin/klien.php?id=' . $id . '#dekor');
         }
 
         elseif ($act === 'stage') {
@@ -597,6 +642,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pid = (int) $_POST['payment_id'];
             $p   = one("SELECT * FROM payments WHERE id = ? AND client_id = ?", [$pid, (int) $_POST['id']]);
             if (!$p) throw new RuntimeException('Termin tidak ditemukan.');
+            // Termin DP ditandai lunas saat klien menunggu DP = serah terima.
+            // Lewat dpDiterima supaya tahap, event, dan pegangan ikut pindah.
+            $cDp = one("SELECT stage FROM clients WHERE id = ?", [(int) $p['client_id']]);
+            if (!$p['paid_at'] && ($cDp['stage'] ?? '') === 'dp' && (int) (terminDp((int) $p['client_id'])['id'] ?? 0) === $pid) {
+                $r = dpDiterima((int) $p['client_id'], (int) $user['id']);
+                flash($p['label'] . ' diterima — klien sekarang Deal dan dipegang admin office.'
+                    . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
+                redirect('admin/klien.php?id=' . (int) $p['client_id']);
+            }
             q("UPDATE payments SET paid_at = " . ($p['paid_at'] ? 'NULL' : 'CURDATE()') . " WHERE id = ?", [$pid]);
             if ($p && !$p['paid_at']) {
                 clientLog((int) $_POST['id'], 'bayar', $p['label'] . ' diterima', rupiah($p['amount']), $user['id']);
@@ -723,6 +777,17 @@ if ($c):
     $bolehJual = in_array($peranSaya, ['owner', 'admin_early'], true);   // menyusun & memutus penawaran
     $officeTunggu = $peranSaya === 'admin_office' && !$sudahDeal && $stage !== 'batal';
 
+    // Dokumen terakhir yang masih berlaku (revisi lama dilewati).
+    $qAkhir = null;
+    foreach ($quotes as $qx) if ($qx['status'] !== 'revisi') { $qAkhir = $qx; break; }
+    $paketPilihan = $bolehJual ? paketDaftar(false) : [];
+    $pMinat = null;
+    foreach ($paketPilihan as $t) if ((int) $t['id'] === (int) ($c['paket_minat'] ?? 0)) $pMinat = $t;
+    $dpRow = in_array($stage, ['dp', 'deal'], true) ? terminDp((int) $c['id']) : null;
+    $rek   = rekeningBaris();
+    $waKlien = $c['phone'] ? preg_replace('/\D/', '', $c['phone']) : '';
+    if (str_starts_with($waKlien, '0')) $waKlien = '62' . substr($waKlien, 1);
+
     $stQ = fn(string $s) => [
         'draf' => ['Draf', 'draft'], 'terkirim' => ['Terkirim', 'warn'], 'cocok' => ['Disetujui', 'live'],
         'revisi' => ['Direvisi', 'draft'], 'tidak_cocok' => ['Ditolak', 'bad'],
@@ -779,8 +844,8 @@ if ($c):
         <div class="field" style="margin:0;min-width:180px">
           <label>Tahap</label>
           <select name="stage" onchange="this.form.note.required = this.value === 'batal'">
-            <?php foreach (PIPE_STAGES as $k => $m): ?>
-              <option value="<?= $k ?>" <?= $stage === $k ? 'selected' : '' ?>><?= e($k === 'batal' ? 'Tidak jadi' : $m['label']) ?></option>
+            <?php foreach (array_unique([...TAHAP_PILIHAN, $stage]) as $k): ?>
+              <option value="<?= $k ?>" <?= $stage === $k ? 'selected' : '' ?>><?= e($k === 'batal' ? 'Tidak jadi' : stageLabel($k)) ?></option>
             <?php endforeach; ?>
           </select>
         </div>
@@ -790,7 +855,7 @@ if ($c):
         </div>
         <button class="btn" type="submit">Pindahkan</button>
       </form>
-      <p class="hint" style="margin:8px 0 0">Biasanya tidak perlu: tahap maju sendiri saat price list/penawaran ditandai terkirim, disetujui, atau saat konsultasi dijadwalkan.</p>
+      <p class="hint" style="margin:8px 0 0">Biasanya tidak perlu: tahap maju sendiri saat price list terkirim, klien cocok, dan DP ditandai masuk.</p>
     </details>
     <?php endif; ?>
   </div>
@@ -804,82 +869,120 @@ if ($c):
       <?php if ($officeTunggu): ?>
         <h2>Belum diserahkan</h2>
         <p class="sub" style="margin:0">Klien ini masih tahap <b><?= e(stageLabel($stage)) ?></b> dan dipegang admin early.
-          Begitu penawarannya disetujui, klien pindah ke papanmu otomatis.</p>
+          Begitu DP 30% masuk, klien pindah ke papanmu otomatis.</p>
 
       <?php elseif ($stage === 'baru'): ?>
-        <h2>Kirim price list</h2>
-        <p class="sub"><?= $c['dari_form'] ? 'Masuk sendiri lewat formulir — prospek paling panas. ' : '' ?>Balas, lalu kirim price list. Paling cepat dari template; begitu ditandai terkirim, tahap maju ke <b>Price list</b>.</p>
+        <h2>Lengkapi biodata awal &amp; kirim price list</h2>
+        <p class="sub"><?= $c['dari_form'] ? 'Masuk sendiri lewat formulir — prospek paling panas. ' : '' ?>Cek data awalnya, lalu kirim price list:
+          dari paket di situs atau template sendiri. Dokumennya PDF dan dikirim lewat WhatsApp; begitu terkirim, tahap maju ke <b>Price list terkirim</b>.</p>
+        <ul class="butir">
+          <?= $butir($c['name'] !== '' && (string) $c['partner_name'] !== '', 'Nama kedua mempelai', '#data') ?>
+          <?= $butir((bool) $c['phone'], $c['phone'] ? 'WhatsApp ' . e($c['phone']) : 'Nomor WhatsApp', '#data') ?>
+          <?= $butir((bool) $c['wedding_date'], $c['wedding_date'] ? 'Tanggal rencana ' . e(tanggalID($c['wedding_date'])) : 'Tanggal rencana', '#data') ?>
+          <?= $butir((bool) $c['guest_estimate'], $c['guest_estimate'] ? '±' . number_format((int) $c['guest_estimate'], 0, ',', '.') . ' tamu' : 'Perkiraan jumlah tamu', '#data') ?>
+          <?= $butir((bool) $pMinat, $pMinat ? 'Paket diminati: ' . e($pMinat['nama']) : 'Paket diminati belum dipilih', '#data') ?>
+        </ul>
         <div class="aksi">
           <?php if ($plAkhir && $plAkhir['status'] === 'draf'): ?>
             <a class="btn solid" href="penawaran.php?id=<?= (int) $plAkhir['id'] ?>">Lanjutkan price list <?= e($plAkhir['nomor']) ?> →</a>
+          <?php elseif ($bolehJual && $pMinat): ?>
+            <form method="post" action="penawaran.php" style="display:inline">
+              <?= csrfField() ?><input type="hidden" name="act" value="buat"><input type="hidden" name="jenis" value="pricelist">
+              <input type="hidden" name="client_id" value="<?= (int) $c['id'] ?>"><input type="hidden" name="template_id" value="<?= (int) $pMinat['id'] ?>">
+              <button class="btn solid" type="submit">Siapkan price list <?= e($pMinat['nama']) ?> →</button></form>
+            <a class="btn" href="penawaran.php?client=<?= (int) $c['id'] ?>">Paket lain / susun sendiri</a>
           <?php elseif ($bolehJual): ?>
-            <a class="btn solid" href="penawaran.php?client=<?= (int) $c['id'] ?>">Susun price list →</a>
+            <a class="btn solid" href="penawaran.php?client=<?= (int) $c['id'] ?>">Pilih paket &amp; susun price list →</a>
           <?php endif; ?>
+          <?php if ($waKlien): ?><a class="btn ghost" target="_blank" rel="noopener" href="https://wa.me/<?= e($waKlien) ?>">WhatsApp ↗</a><?php endif; ?>
           <a class="btn ghost" href="jadwal.php?new=1&client=<?= (int) $c['id'] ?>">Jadwalkan konsultasi</a>
-          <?php if ($c['phone']): ?><a class="btn ghost" target="_blank" rel="noopener" href="https://wa.me/<?= e(preg_replace('/\D/', '', $c['phone'])) ?>">WhatsApp ↗</a><?php endif; ?>
         </div>
 
-      <?php elseif ($stage === 'pricelist'): ?>
-        <h2>Tunggu tanggapan price list</h2>
-        <?php if ($plAkhir): [$sl, $sc] = $stQ($plAkhir['status']); ?>
-          <p class="sub"><b><?= e($plAkhir['nomor']) ?></b> · <span class="pill <?= $sc ?>"><?= e($sl) ?></span>
-            <?= $plAkhir['sent_at'] ? ' · terkirim ' . e(labelHari(substr($plAkhir['sent_at'], 0, 10))) : '' ?>
-            · <?= $plAkhir['seen_at'] ? '<span style="color:var(--sage)">sudah dibuka klien ' . e(labelHari(substr($plAkhir['seen_at'], 0, 10))) . '</span>' : 'belum dibuka klien' ?></p>
+      <?php elseif (in_array($stage, ['pricelist', 'spesifikasi', 'penawaran'], true)): ?>
+        <h2>Tunggu tanggapan klien</h2>
+        <?php if ($qAkhir): [$sl, $sc] = $stQ($qAkhir['status']); $totQ = (float) $qAkhir['total']; ?>
+          <p class="sub"><b><?= e($qAkhir['nomor']) ?></b><?= !empty($qAkhir['paket_nama']) ? ' · ' . e($qAkhir['paket_nama']) : '' ?>
+            · <?= $totQ > 0 ? rupiah($totQ) : '<span style="color:var(--ember)">harga belum diisi</span>' ?>
+            · <span class="pill <?= $sc ?>"><?= e($sl) ?></span>
+            <?= $qAkhir['sent_at'] ? ' · terkirim ' . e(labelHari(substr($qAkhir['sent_at'], 0, 10))) : '' ?>
+            · <?= $qAkhir['seen_at'] ? '<span style="color:var(--sage)">sudah dibuka klien ' . e(labelHari(substr($qAkhir['seen_at'], 0, 10))) . '</span>' : 'belum dibuka klien' ?>
+            <?php if (!empty($qAkhir['nego_nilai'])): ?><br>Klien menawar <b style="color:var(--ember)"><?= rupiah((float) $qAkhir['nego_nilai']) ?></b><?= $qAkhir['nego_catatan'] ? ' — ' . e($qAkhir['nego_catatan']) : '' ?><?php endif; ?></p>
           <?php if ($bolehJual): ?>
           <div class="aksi">
-            <form method="post" action="penawaran.php" style="display:inline" onsubmit="return confirm('Klien cocok dengan price list ini? Klien lanjut ke tahap Spesifikasi.')">
-              <?= csrfField() ?><input type="hidden" name="act" value="cocok"><input type="hidden" name="id" value="<?= (int) $plAkhir['id'] ?>">
-              <button class="btn solid" type="submit">Klien cocok → Spesifikasi</button></form>
-            <a class="btn" href="penawaran.php?id=<?= (int) $plAkhir['id'] ?>">Buka price list</a>
+            <?php if ($qAkhir['status'] === 'cocok'): ?>
+              <?= $formTahap('dp', 'Lanjut: tagih DP 30% →') ?>
+            <?php elseif ($totQ > 0 && in_array($qAkhir['status'], ['draf', 'terkirim'], true)): ?>
+              <form method="post" action="penawaran.php" style="display:inline"
+                    onsubmit="return confirm(<?= e(json_encode('Klien cocok dengan ' . $qAkhir['nomor'] . ' (' . rupiah($totQ) . ')? DP 30% (' . rupiah(round($totQ * 0.3)) . ') langsung ditagih.')) ?>)">
+                <?= csrfField() ?><input type="hidden" name="act" value="cocok"><input type="hidden" name="id" value="<?= (int) $qAkhir['id'] ?>">
+                <button class="btn solid" type="submit">Klien cocok → tagih DP 30%</button></form>
+            <?php endif; ?>
+            <a class="btn" href="penawaran.php?id=<?= (int) $qAkhir['id'] ?>">Buka price list</a>
             <a class="btn ghost" href="jadwal.php?new=1&client=<?= (int) $c['id'] ?>">Jadwalkan konsultasi</a>
           </div>
-          <p class="hint" style="margin:10px 0 0">Klien menawar atau tidak cocok? Buka price list-nya — tanggapan dicatat di sana.</p>
+          <?php if ($totQ <= 0): ?>
+            <p class="hint" style="margin:10px 0 0;color:var(--ember)">Harga paket belum diisi — isi dulu di price list supaya DP 30% bisa dihitung.</p>
+          <?php else: ?>
+            <p class="hint" style="margin:10px 0 0">Klien menawar → buka price list, catat tawarannya lalu buat revisi. Tidak cocok → catat di sana juga (masuk Analisa).</p>
+          <?php endif; ?>
           <?php endif; ?>
         <?php else: ?>
           <p class="sub">Belum ada price list tercatat untuk klien ini.</p>
           <?php if ($bolehJual): ?><div class="aksi"><a class="btn solid" href="penawaran.php?client=<?= (int) $c['id'] ?>">Susun price list →</a></div><?php endif; ?>
         <?php endif; ?>
 
-      <?php elseif ($stage === 'spesifikasi'): ?>
-        <h2>Gali spesifikasi, lalu susun penawaran</h2>
-        <p class="sub">Price list cocok. Konsultasi terjadi di tahap ini — kumpulkan bahannya, lalu susun penawaran.</p>
-        <ul class="butir">
-          <?= $butir((bool) $meets, $meets ? count($meets) . ' pertemuan tercatat' : 'Jadwalkan konsultasi', 'jadwal.php?new=1&client=' . (int) $c['id']) ?>
-          <?= $butir($nKebutuhan > 0, $nKebutuhan ? $nKebutuhan . ' jenis vendor dicentang' : 'Centang kebutuhan vendor', '#kebutuhan') ?>
-          <?= $butir($c['wedding_date'] && $c['guest_estimate'], 'Tanggal dan jumlah tamu terisi', '#data') ?>
-        </ul>
-        <div class="aksi">
-          <?php if ($pnAkhir && $pnAkhir['status'] === 'draf'): ?>
-            <a class="btn solid" href="penawaran.php?id=<?= (int) $pnAkhir['id'] ?>">Lanjutkan penawaran <?= e($pnAkhir['nomor']) ?> →</a>
-          <?php elseif ($bolehJual): ?>
-            <a class="btn solid" href="penawaran.php?client=<?= (int) $c['id'] ?>">Susun penawaran →</a>
+      <?php elseif ($stage === 'dp'): ?>
+        <h2>Tagih DP 30%</h2>
+        <?php if ($dpRow): ?>
+          <p class="sub">Klien cocok<?= $c['deal_value'] ? ' dengan nilai <b>' . rupiah((float) $c['deal_value']) . '</b>' : '' ?>.
+            Tagih <b><?= e($dpRow['label']) ?> <?= rupiah((float) $dpRow['amount']) ?></b><?= $dpRow['due_date'] ? ' paling lambat <b>' . e(tanggalID($dpRow['due_date'])) . '</b>' : '' ?>.
+            Begitu DP masuk, klien otomatis diserahkan ke <b>admin office</b> untuk biodata lengkap, dekor, venue, termin, dan meeting.</p>
+          <?php if ($bolehJual): ?>
+            <form method="post" class="row c3" style="align-items:end;margin:4px 0 10px">
+              <?= csrfField() ?><input type="hidden" name="act" value="dp_masuk"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
+              <div class="field" style="margin:0"><label>Tanggal DP masuk</label><input type="date" name="tanggal" value="<?= date('Y-m-d') ?>"></div>
+              <div class="field" style="margin:0"><label>Cara bayar</label>
+                <select name="metode"><option>Transfer bank</option><option>Tunai</option><option>QRIS</option><option>Lainnya</option></select></div>
+              <div class="field" style="margin:0"><button class="btn solid" type="submit" style="width:100%"
+                onclick="return confirm('DP sudah benar-benar masuk? Klien akan diserahkan ke admin office.')">Konfirmasi DP masuk</button></div>
+            </form>
+            <?php
+              $tagihWA = 'Halo ' . $c['name'] . ', terima kasih sudah memilih ' . setting('site_name', 'Callalily Party') . '.'
+                . "\n\nUntuk mengunci tanggal" . ($c['wedding_date'] ? ' ' . tanggalID($c['wedding_date']) : '')
+                . ', mohon transfer ' . $dpRow['label'] . ' sebesar ' . rupiah((float) $dpRow['amount'])
+                . ($dpRow['due_date'] ? ' paling lambat ' . tanggalID($dpRow['due_date']) : '') . '.'
+                . ($rek ? "\n\n" . implode("\n", $rek) : '')
+                . "\n\nSetelah transfer, mohon kirim bukti transfernya di sini ya. Terima kasih!";
+            ?>
+            <div class="aksi">
+              <?php if ($waKlien): ?><a class="btn" target="_blank" rel="noopener" href="https://wa.me/<?= e($waKlien) ?>?text=<?= rawurlencode($tagihWA) ?>">Kirim tagihan DP lewat WhatsApp ↗</a><?php endif; ?>
+              <a class="btn ghost" href="#uang">Lihat termin</a>
+              <?php if ($qAkhir): ?><a class="btn ghost" href="penawaran.php?id=<?= (int) $qAkhir['id'] ?>">Price list</a><?php endif; ?>
+            </div>
+            <?php if (!$rek): ?><p class="hint" style="margin:10px 0 0;color:var(--ember)">Nomor rekening belum diisi di Pengaturan → Price list &amp; pembayaran, jadi teks tagihan belum memuat rekening.</p><?php endif; ?>
           <?php endif; ?>
-        </div>
-
-      <?php elseif ($stage === 'penawaran'): ?>
-        <h2>Tunggu keputusan penawaran</h2>
-        <?php if ($pnAkhir): [$sl, $sc] = $stQ($pnAkhir['status']); ?>
-          <p class="sub"><b><?= e($pnAkhir['nomor']) ?></b> · <?= rupiah((float) $pnAkhir['total']) ?> · <span class="pill <?= $sc ?>"><?= e($sl) ?></span>
-            · <?= $pnAkhir['seen_at'] ? '<span style="color:var(--sage)">sudah dibuka klien</span>' : 'belum dibuka klien' ?>
-            <?php if (!empty($pnAkhir['nego_nilai'])): ?><br>Klien menawar <b style="color:var(--ember)"><?= rupiah((float) $pnAkhir['nego_nilai']) ?></b><?= $pnAkhir['nego_catatan'] ? ' — ' . e($pnAkhir['nego_catatan']) : '' ?><?php endif; ?></p>
-          <div class="aksi"><a class="btn solid" href="penawaran.php?id=<?= (int) $pnAkhir['id'] ?>">Buka &amp; catat keputusan →</a></div>
-          <p class="hint" style="margin:10px 0 0">Setuju → deal (termin dan event disusun otomatis). Menawar → catat lalu buat revisi. Mundur → tidak jadi.</p>
         <?php else: ?>
-          <p class="sub">Belum ada penawaran tercatat.</p>
-          <?php if ($bolehJual): ?><div class="aksi"><a class="btn solid" href="penawaran.php?client=<?= (int) $c['id'] ?>">Susun penawaran →</a></div><?php endif; ?>
+          <p class="sub">Nilai deal belum ada, jadi DP 30% belum bisa dihitung. Isi harga di price list yang disetujui, atau nilai deal di tab Biodata awal.</p>
+          <?php if ($qAkhir): ?><div class="aksi"><a class="btn solid" href="penawaran.php?id=<?= (int) $qAkhir['id'] ?>">Buka price list</a></div><?php endif; ?>
         <?php endif; ?>
 
-      <?php elseif ($stage === 'deal'): ?>
-        <h2>Deal — siapkan serah terima</h2>
-        <p class="sub">Kontrak <?= $c['deal_value'] ? rupiah((float) $c['deal_value']) : '' ?> sudah di tangan admin office. Lengkapi tiga hal ini, lalu mulai persiapan.</p>
+      <?php elseif ($stage === 'deal'):
+        $meetOffice = array_filter($meets, fn($m) => !$c['handover_at'] || $m['start_at'] >= $c['handover_at']);
+        $venueAda = !empty($wi['resepsi_lokasi']) || !empty($wi['akad_lokasi']) || !empty($c['venue']); ?>
+        <h2>Deal — susun acara bersama klien</h2>
+        <p class="sub">DP sudah masuk<?= !empty($c['handover_at']) ? ' ' . e(mb_strtolower(labelHari(substr($c['handover_at'], 0, 10)))) : '' ?><?= $c['deal_value'] ? ' · kontrak ' . rupiah((float) $c['deal_value']) : '' ?>.
+          Lengkapi bersama klien, lalu mulai persiapan.</p>
         <ul class="butir">
-          <?= $butir(!empty($c['data_lengkap_at']), 'Data lengkap (orang tua, prosesi adat)', '#datalengkap') ?>
-          <?= $butir((bool) $pays, $pays ? count($pays) . ' termin pembayaran tersusun' : 'Susun termin pembayaran', '#uang') ?>
-          <?= $butir((bool) $vAda, $vAda ? count($vAda) . ' vendor dipilih' : 'Pilih vendor pesta ini', '#vendor') ?>
+          <?= $butir(!empty($c['data_lengkap_at']), 'Biodata lengkap &amp; keluarga mempelai', '#datalengkap') ?>
+          <?= $butir($venueAda, $venueAda ? 'Venue: ' . e($wi['resepsi_lokasi'] ?? '' ?: ($wi['akad_lokasi'] ?? '' ?: $c['venue'])) : 'Pilih venue &amp; jam acara', '#data') ?>
+          <?= $butir(trim((string) ($wi['konsep_dekor'] ?? '')) !== '', 'Konsep &amp; susunan dekor', '#dekor') ?>
+          <?= $butir((bool) $vAda, $vAda ? count($vAda) . ' vendor dipilih' : 'Pilih vendor', '#vendor') ?>
+          <?= $butir(count($pays) > 1, $pays ? count($pays) . ' termin pembayaran tersusun' : 'Susun termin pembayaran', '#uang') ?>
+          <?= $butir((bool) $meetOffice, $meetOffice ? count($meetOffice) . ' meeting tercatat' : 'Jadwalkan meeting pertama', 'jadwal.php?new=1&client=' . (int) $c['id']) ?>
         </ul>
         <div class="aksi">
           <?= $formTahap('persiapan', 'Mulai persiapan →', 'solid', 'Mulai persiapan? Checklist H-90 sampai H+3 dibuat otomatis.') ?>
-          <a class="btn ghost" href="#datalengkap">Isi data lengkap</a>
+          <a class="btn ghost" href="jadwal.php?new=1&client=<?= (int) $c['id'] ?>">Jadwalkan meeting</a>
         </div>
 
       <?php elseif ($stage === 'persiapan' || $stage === 'harih'): ?>
@@ -925,13 +1028,16 @@ if ($c):
     <!-- ---------- Tab ---------- -->
     <?php
     $tabs = [
+        // Urutannya mengikuti perjalanan klien: biodata awal & price list
+        // (admin early), lalu biodata lengkap, acara & dekor, vendor, dan
+        // pembayaran (admin office, setelah DP).
         'ikhtisar'    => ['Ikhtisar', 0],
-        'kebutuhan'   => ['Kebutuhan', $nKebutuhan],
-        'penawaran'   => ['Penawaran', count($quotes)],
-        'datalengkap' => ['Data lengkap', 0],
+        'data'        => ['Biodata awal', 0],
+        'penawaran'   => ['Price list', count($quotes)],
+        'datalengkap' => ['Biodata lengkap', 0],
+        'kebutuhan'   => ['Acara & dekor', 0],
         'vendor'      => ['Vendor', count($vAda)],
         'uang'        => ['Pembayaran', count($pays)],
-        'data'        => ['Data klien', 0],
     ];
     ?>
     <nav class="tabs" id="tabKlien" role="tablist">
@@ -974,7 +1080,7 @@ if ($c):
         <a class="btn sm ghost" href="jadwal.php?new=1&client=<?= $c['id'] ?>">+ Jadwalkan</a>
       </div>
       <?php if (!$meets): ?>
-        <p class="sub" style="margin:0">Belum ada pertemuan. Konsultasi yang dijadwalkan untuk prospek otomatis membawanya ke tahap Spesifikasi.</p>
+        <p class="sub" style="margin:0">Belum ada pertemuan. Konsultasi (admin early) maupun meeting persiapan (admin office) dijadwalkan dari sini.</p>
       <?php else: foreach ($meets as $m): ?>
         <div style="padding:11px 0;border-bottom:1px solid var(--ivory-07)">
           <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
@@ -1041,6 +1147,27 @@ if ($c):
     </section>
 
     <section class="tabpane" data-pane="kebutuhan" id="tab-kebutuhan">
+    <!-- ---------- Acara, venue & dekor ---------- -->
+    <div class="card" id="dekor">
+      <h2>Acara, venue &amp; dekor</h2>
+      <p class="sub">Disusun admin office bersama klien setelah DP. Tanggal, jam, dan lokasi akad/resepsi diubah di
+        <a href="#data" style="color:var(--ember)">Biodata awal</a>; susunan dekor dicatat di sini.</p>
+      <div class="grid g2" style="margin-bottom:14px">
+        <div><span class="lab">Akad / pemberkatan</span>
+          <div style="margin-top:5px;font-size:14px"><?= !empty($wi['akad_tanggal']) ? e(tanggalID($wi['akad_tanggal'])) . (!empty($wi['akad_jam']) ? ' · ' . substr($wi['akad_jam'], 0, 5) : '') : '<span class="muted">Tanggal belum ada</span>' ?><br>
+            <?= !empty($wi['akad_lokasi']) ? e($wi['akad_lokasi']) : '<span class="muted">Lokasi belum dipilih</span>' ?></div></div>
+        <div><span class="lab">Resepsi</span>
+          <div style="margin-top:5px;font-size:14px"><?= !empty($wi['resepsi_tanggal']) ? e(tanggalID($wi['resepsi_tanggal'])) . (!empty($wi['resepsi_jam']) ? ' · ' . substr($wi['resepsi_jam'], 0, 5) : '') : ($c['wedding_date'] ? e(tanggalID($c['wedding_date'])) : '<span class="muted">Tanggal belum ada</span>') ?><br>
+            <?= !empty($wi['resepsi_lokasi']) ? e($wi['resepsi_lokasi']) : ($c['venue'] ? e($c['venue']) : '<span class="muted">Venue belum dipilih</span>') ?></div></div>
+      </div>
+      <form method="post">
+        <?= csrfField() ?><input type="hidden" name="act" value="dekor"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
+        <div class="field"><label for="kd">Konsep &amp; susunan dekor</label>
+          <textarea id="kd" name="konsep_dekor" rows="7" placeholder="Tema &amp; palet warna&#10;Pelaminan / backdrop&#10;Bunga (segar / artifisial), meja tamu, area foto&#10;Jalur masuk, pencahayaan&#10;Referensi (tautan Pinterest / Instagram)"><?= e($wi['konsep_dekor'] ?? '') ?></textarea>
+          <p class="hint" style="margin:6px 0 0">Ditulis sesuai hasil meeting dengan klien — ini yang dibawa ke vendor dekorasi.</p></div>
+        <button class="btn solid" type="submit">Simpan konsep dekor</button>
+      </form>
+    </div>
     <!-- ---------- Kebutuhan vendor (dari base information) ---------- -->
     <?php
     // Data ini diisi di formulir klien baru tapi sebelumnya tidak pernah
@@ -1288,7 +1415,7 @@ if ($c):
         <?php if ($bolehJual): ?><a class="btn sm solid" href="penawaran.php?client=<?= (int) $c['id'] ?>">+ Buat baru</a><?php endif; ?>
       </div>
       <?php if (!$quotes): ?>
-        <p class="sub" style="margin:0">Belum ada. Price list dikirim di tahap Prospek baru; penawaran disusun setelah spesifikasi.</p>
+        <p class="sub" style="margin:0">Belum ada. Price list disusun dari paket (atau template kosong) lalu dikirim sebagai PDF lewat WhatsApp.</p>
       <?php else: ?>
         <table class="tbl">
           <thead><tr><th>Nomor</th><th>Jenis</th><th>Status</th><th class="num">Total</th><th>Dibuka klien</th><th></th></tr></thead>
@@ -1327,9 +1454,9 @@ if ($c):
       </h2>
 
       <?php if (!$sudahDeal): ?>
-        <p class="sub" style="color:var(--ember)">Klien belum deal. Blok ini boleh diisi sekarang
-          kalau datanya kebetulan sudah diketahui, tapi bukan syarat menyusun penawaran —
-          jangan menahan penawaran gara-gara ini.</p>
+        <p class="sub" style="color:var(--ember)">Klien belum DP. Biodata lengkap biasanya diisi admin office
+          setelah DP masuk — boleh diisi sekarang kalau datanya kebetulan sudah diketahui, tapi bukan syarat
+          mengirim price list.</p>
       <?php elseif ($dlTertunda): ?>
         <p class="sub" style="color:var(--ember)">Sudah deal
           <?= !empty($c['handover_at']) ? '(' . e(labelHari(substr($c['handover_at'], 0, 10))) . ')' : '' ?>
@@ -1729,9 +1856,9 @@ if ($c):
       $ja = $wi['jenis_acara'] ?? '';
     ?>
     <div class="card" id="data">
-      <h2>Data klien</h2>
-      <p class="sub">Hari-H, jam, dan venue di ringkasan diambil dari resepsi — kalau tidak ada resepsi, dari akad.
-        Orang tua, prosesi adat, usia, dan pekerjaan ada di tab <a href="#datalengkap" style="color:var(--ember)">Data lengkap</a>.</p>
+      <h2>Biodata awal</h2>
+      <p class="sub">Cukup untuk mengirim price list. Hari-H, jam, dan venue di ringkasan diambil dari resepsi — kalau tidak ada resepsi, dari akad.
+        Orang tua, prosesi adat, usia, dan pekerjaan ada di tab <a href="#datalengkap" style="color:var(--ember)">Biodata lengkap &amp; keluarga</a>.</p>
       <form method="post">
         <?= csrfField() ?><input type="hidden" name="act" value="save"><input type="hidden" name="id" value="<?= $c['id'] ?>">
         <input type="hidden" name="base_info" value="1"><input type="hidden" name="tab" value="data">
@@ -1805,7 +1932,15 @@ if ($c):
         </div>
         <div class="row c3">
           <div class="field"><label>Perkiraan budget / plafon</label><input type="text" name="budget_estimate" data-rp inputmode="numeric" value="<?= $c['budget_estimate'] ? (int) $c['budget_estimate'] : '' ?>"></div>
-          <div class="field"><label>Paket diminati</label><input type="text" name="package" value="<?= e($c['package']) ?>"></div>
+          <div class="field"><label>Paket diminati</label>
+            <?php $semuaPaket = paketDaftar(false); ?>
+            <select name="paket_minat">
+              <option value="0">— belum memilih —</option>
+              <?php foreach ($semuaPaket as $t): ?>
+                <option value="<?= (int) $t['id'] ?>" <?= (int) ($c['paket_minat'] ?? 0) === (int) $t['id'] ? 'selected' : '' ?>><?= e($t['nama']) ?><?= empty($t['tampil_web']) ? ' (internal)' : '' ?></option>
+              <?php endforeach; ?>
+            </select>
+            <?php if (!$c['paket_minat'] && $c['package']): ?><p class="hint">Tertulis: <?= e($c['package']) ?></p><?php endif; ?></div>
           <div class="field"><label>Nilai deal</label><input type="text" name="deal_value" data-rp inputmode="numeric" value="<?= $c['deal_value'] ? (int) $c['deal_value'] : '' ?>">
             <p class="hint">Terisi sendiri dari penawaran yang disetujui.</p></div>
         </div>
@@ -1935,236 +2070,75 @@ if ($c):
    ============================================================ */
 elseif ($new):
   pageHead('Klien baru',
-           'Cukup sampai yang dibutuhkan untuk menyusun penawaran. Orang tua, prosesi adat, '
-         . 'usia, dan pekerjaan diisi belakangan lewat panel Data lengkap setelah klien deal.',
+           'Biodata awal — cukup untuk mengirim price list. Biodata lengkap, keluarga, acara, dan dekor '
+         . 'dilengkapi admin office setelah DP 30% masuk.',
            '<a class="btn ghost" href="klien.php">← Kembali</a>');
-
-  // Master jenis vendor dibaca dari tabel, bukan konstanta PHP — catatan owner
-  // menegaskan daftarnya "diisi sendiri", jadi harus bisa tumbuh tanpa deploy.
-  $katInduk = [];
-  try {
-      $katInduk = all("SELECT id, nama FROM vendor_categories
-                       WHERE parent_id IS NULL AND is_active = 1 ORDER BY urutan, nama");
-  } catch (Throwable $e) { $katInduk = []; }
+  $paketBaru = paketDaftar(false);
 ?>
 <form method="post">
   <?= csrfField() ?><input type="hidden" name="act" value="save"><input type="hidden" name="id" value="0">
-  <input type="hidden" name="base_info" value="1">
 
   <div class="card">
-    <h2>Pengantin</h2>
+    <h2>Mempelai &amp; kontak</h2>
     <div class="row c2">
       <div class="field"><label for="n">Mempelai pria</label>
         <input type="text" id="n" name="name" required autofocus placeholder="Zakki"></div>
       <div class="field"><label for="pn">Mempelai wanita</label>
         <input type="text" id="pn" name="partner_name" placeholder="Winda"></div>
     </div>
-    <div class="row c2">
-      <div class="field"><label for="em">Email</label>
-        <input type="email" id="em" name="email" placeholder="zakki@email.com"></div>
+    <div class="row c3">
       <div class="field"><label for="ph">WhatsApp</label>
-        <input type="text" id="ph" name="phone" placeholder="628123456789"></div>
-    </div>
-    <div class="row c2">
+        <input type="text" id="ph" name="phone" inputmode="tel" placeholder="0812…"></div>
+      <div class="field"><label for="em">Email</label>
+        <input type="email" id="em" name="email"></div>
       <div class="field"><label for="ig">Instagram</label>
         <input type="text" id="ig" name="instagram" placeholder="zakkiwinda"></div>
+    </div>
+    <div class="row c2">
       <div class="field"><label for="src">Tahu dari mana</label>
         <select id="src" name="source">
           <?php foreach (['instagram'=>'Instagram','whatsapp'=>'WhatsApp','web'=>'Situs web','referral'=>'Rekomendasi teman','vendor'=>'Vendor lain','walkin'=>'Datang langsung','lainnya'=>'Lainnya'] as $k => $v): ?>
             <option value="<?= $k ?>"><?= $v ?></option>
           <?php endforeach; ?>
         </select></div>
-    </div>
-    <div class="field"><label for="sd">Rincinya</label>
-      <input type="text" id="sd" name="sumber_detail" placeholder="Akun @siapa, teman siapa, vendor mana"></div>
-
-    <span class="lab" style="display:block;margin:16px 0 6px">Tipe klien</span>
-    <p class="hint" style="margin:0 0 9px">Menentukan cara penawaran disusun nanti. Bisa diubah belakangan.</p>
-    <div class="row c2" style="gap:9px">
-      <label style="display:flex;gap:9px;align-items:flex-start;padding:11px 13px;
-                    border:1px solid var(--ivory-12);border-radius:10px;cursor:pointer;margin:0">
-        <input type="radio" name="tipe_klien" value="tematis" checked style="margin-top:3px">
-        <span><b style="color:var(--ivory)">On tematis</b> — wedding dream.<br>
-          <span style="font-size:12.3px;color:var(--ivory-38)">Paket mengikuti request. Budget jadi perkiraan, bukan batas.</span></span>
-      </label>
-      <label style="display:flex;gap:9px;align-items:flex-start;padding:11px 13px;
-                    border:1px solid var(--ivory-12);border-radius:10px;cursor:pointer;margin:0">
-        <input type="radio" name="tipe_klien" value="budgeting" style="margin-top:3px">
-        <span><b style="color:var(--ivory)">On budgeting</b> — paket menyesuaikan anggaran.<br>
-          <span style="font-size:12.3px;color:var(--ivory-38)">Plafon dikunci. Vendor diisi menurut prioritas sampai plafon habis, sisanya jadi opsional.</span></span>
-      </label>
+      <div class="field"><label for="sd">Rincinya</label>
+        <input type="text" id="sd" name="sumber_detail" placeholder="Akun @siapa, teman siapa, vendor mana"></div>
     </div>
   </div>
 
   <div class="card">
-    <h2>Base information</h2>
-    <p class="sub">Boleh dikosongi sekarang dan dilengkapi saat konsultasi.
-      Tanggal hari-H, venue, dan jam diambil dari resepsi — kalau tidak ada resepsi, dari akad.</p>
-
-    <div class="grid g2" style="align-items:start">
-      <div>
-        <span class="lab" style="display:block;margin-bottom:7px">Akad / pemberkatan</span>
-        <div class="row c2">
-          <div class="field"><label for="at">Tanggal</label><input type="date" id="at" name="akad_tanggal"></div>
-          <div class="field"><label for="aj">Jam</label><input type="time" id="aj" name="akad_jam"></div>
-        </div>
-        <div class="field"><label for="al">Lokasi</label>
-          <input type="text" id="al" name="akad_lokasi" placeholder="Masjid, gereja, atau rumah"></div>
-      </div>
-      <div>
-        <span class="lab" style="display:block;margin-bottom:7px">Resepsi</span>
-        <div class="row c2">
-          <div class="field"><label for="rt">Tanggal</label><input type="date" id="rt" name="resepsi_tanggal"></div>
-          <div class="field"><label for="rj">Jam</label><input type="time" id="rj" name="resepsi_jam"></div>
-        </div>
-        <div class="field"><label for="rl">Lokasi</label>
-          <input type="text" id="rl" name="resepsi_lokasi" placeholder="Royal Ambarrukmo"></div>
-      </div>
-    </div>
-
-    <div class="row c2">
-      <div class="field"><label for="ge">Tamu resepsi</label>
-        <input type="number" id="ge" name="tamu_resepsi" step="50" placeholder="500"></div>
-      <div class="field"><label for="ga">Tamu akad / pemberkatan</label>
-        <input type="number" id="ga" name="tamu_akad" step="25" placeholder="150">
-        <p class="hint" style="margin:6px 0 0">Biasanya jauh lebih sedikit. Boleh dikosongi
-          kalau acaranya menyatu.</p></div>
+    <h2>Rencana acara</h2>
+    <div class="row c3">
+      <div class="field"><label for="wd">Tanggal rencana</label><input type="date" id="wd" name="wedding_date"></div>
+      <div class="field"><label for="ge">Perkiraan tamu</label><input type="number" id="ge" name="guest_estimate" step="50" min="0" placeholder="400"></div>
+      <div class="field"><label for="be">Perkiraan budget</label><input type="text" id="be" name="budget_estimate" data-rp inputmode="numeric" placeholder="Rp"></div>
     </div>
     <div class="row c2">
-      <div class="field"><label for="ct">Kota</label>
-        <input type="text" id="ct" name="city" value="Yogyakarta"></div>
-      <div></div>
+      <div class="field"><label for="ct">Kota</label><input type="text" id="ct" name="city" value="Yogyakarta"></div>
+      <div class="field"><label for="vn">Venue, kalau sudah ada</label><input type="text" id="vn" name="venue"></div>
     </div>
-
-    <div class="row c2">
-      <div class="field"><label>Venue</label>
-        <div style="display:flex;gap:16px;padding-top:8px">
-          <label style="display:flex;gap:6px;align-items:center;font-size:13.5px">
-            <input type="checkbox" name="venue_tipe[indoor]" value="1"> Indoor</label>
-          <label style="display:flex;gap:6px;align-items:center;font-size:13.5px">
-            <input type="checkbox" name="venue_tipe[outdoor]" value="1"> Outdoor</label>
-        </div>
-        <p class="hint" style="margin:6px 0 0">Boleh dua-duanya.</p>
-      </div>
-      <div class="field"><label for="ja">Jenis acara</label>
-        <select id="ja" name="jenis_acara"
-                onchange="document.getElementById('sm').style.display = this.value === 'sitting' ? '' : 'none'">
-          <option value="">— belum ditentukan —</option>
-          <option value="standing">Standing party</option>
-          <option value="sitting">Sitting arrangement</option>
-        </select>
-        <div id="sm" style="display:none;margin-top:9px">
-          <label style="display:block;font-size:13px;margin-bottom:4px">
-            <input type="radio" name="sitting_mode" value="per_seat"> Per seat — ada nama di tiap kursi</label>
-          <label style="display:block;font-size:13px">
-            <input type="radio" name="sitting_mode" value="per_block"> Per block — piring terbang, duduk bebas</label>
-        </div>
-      </div>
-    </div>
-
-    <div class="row c2">
-      <div class="field"><label for="be"><span id="lblBudget">Perkiraan budget</span></label>
-        <input type="text" id="be" name="budget_estimate" data-rp inputmode="numeric" placeholder="40000000">
-        <p class="hint" id="hintBudget" style="margin:6px 0 0">Angka kasar dari klien. Tidak mengikat.</p></div>
-      <div class="field"><label for="pk">Paket diminati</label>
-        <input type="text" id="pk" name="package" placeholder="Kalau klien sudah menyebut nama paket"></div>
-    </div>
-
     <div class="field"><label for="nt">Catatan</label>
-      <textarea id="nt" name="notes" rows="3"
-        placeholder="Konsep yang diinginkan, kendala, permintaan khusus."></textarea></div>
-
-    <p class="hint" style="margin:0">Rangkaian jam per acara diisi belakangan lewat panel
-      <b>Susunan hari</b>. Nama orang tua, prosesi adat, usia, dan pekerjaan lewat panel
-      <b>Data lengkap</b> — dua-duanya di halaman klien ini setelah disimpan.</p>
+      <textarea id="nt" name="notes" rows="3" placeholder="Konsep yang diinginkan, adat, kendala, permintaan khusus."></textarea></div>
   </div>
 
-  <?php if ($katInduk): ?>
   <div class="card">
-    <h2>Jenis vendor yang dibutuhkan</h2>
-    <p class="sub">Centang yang relevan. Tiap yang dicentang membuka daftar lima vendor incaran klien
-      untuk jenis itu sendiri — daftar ini yang nanti jadi baris penawaran.</p>
-
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:7px 14px">
-      <?php foreach ($katInduk as $k): ?>
-        <label style="display:flex;gap:7px;align-items:center;font-size:13.3px;padding:3px 0">
-          <input type="checkbox" class="vn-cek" name="vendor_need[]" value="<?= (int) $k['id'] ?>"
-                 data-kat="<?= (int) $k['id'] ?>">
-          <?= e($k['nama']) ?>
-        </label>
+    <h2>Paket diminati</h2>
+    <p class="sub">Paket ini yang dipakai saat menyiapkan price list. Isi dan harganya diatur di
+      <a href="paket.php" style="color:var(--ember)">Paket &amp; price list</a>.</p>
+    <div class="paket-pilih">
+      <?php foreach ($paketBaru as $t): $hl = paketHargaLabel($t, true); ?>
+        <label class="pilih-tipe"><input type="radio" name="paket_minat" value="<?= (int) $t['id'] ?>">
+          <span><b><?= e($t['nama']) ?></b><small><?= $hl ? e($hl) : 'Harga belum diisi' ?><?= !empty($t['tamu']) ? ' · ±' . number_format((int) $t['tamu'], 0, ',', '.') . ' tamu' : '' ?><?= empty($t['tampil_web']) ? ' · internal' : '' ?></small></span></label>
       <?php endforeach; ?>
+      <label class="pilih-tipe"><input type="radio" name="paket_minat" value="0" checked>
+        <span><b>Belum memilih</b><small>Pilih nanti saat menyusun price list.</small></span></label>
     </div>
-
-    <div id="alokasi" hidden style="margin:16px 0 0;padding:13px 15px;border:1px solid var(--ember-line);
-         border-radius:11px;background:var(--ember-soft)">
-      <span class="lab" style="display:block;margin-bottom:5px">Pembagian plafon</span>
-      <p class="hint" style="margin:0 0 10px">Mode <b>budgeting</b>: lima kategori prioritas di bawah
-        mendapat alokasi utama, sisanya menyesuaikan anggaran yang tersisa. Yang tidak kebagian tetap
-        masuk penawaran tapi ditandai <b>opsional</b> — klien perlu melihat apa yang dikorbankan
-        angkanya, bukan menerima daftar yang sudah dipangkas diam-diam.</p>
-      <div style="display:flex;justify-content:space-between;font-size:12.8px;margin-bottom:4px">
-        <span style="color:var(--ivory-60)"><span id="alokJml">0</span> jenis vendor dicentang</span>
-        <span class="mono" style="color:var(--ember)">± <span id="alokPer">—</span> per jenis</span>
-      </div>
-      <div style="height:8px;background:var(--ivory-07);border-radius:4px;overflow:hidden">
-        <div id="alokBar" style="height:100%;width:0;background:var(--ember);border-radius:4px;transition:width .2s"></div>
-      </div>
-    </div>
-
-    <span class="lab" style="display:block;margin:20px 0 4px">Top 5 prioritas</span>
-    <p class="hint" style="margin:0 0 11px">Dari yang dicentang di atas, lima mana yang harus dapat
-      kualitas terbaik. Urutan menentukan: peringkat 1 dan 2 yang paling menentukan rasa acara,
-      sisanya bergerak lebih longgar saat anggaran ditekan.</p>
-    <?= blokTop5($katInduk) ?>
-  </div>
-  <?php endif; ?>
-
-  <div style="margin-top:18px">
-    <button class="btn solid" type="submit">Simpan klien</button>
   </div>
 
-<script>
-/* Tipe klien mengubah ARTI kolom budget, bukan sekadar menandainya.
-   Sebelumnya memilih tematis atau budgeting tidak mengubah apa pun sampai
-   penawaran dibuat — jadi pilihannya terasa hiasan. Sekarang bedanya terlihat
-   saat mengisi: pada budgeting, angka itu plafon, wajib, dan langsung dibagi
-   ke jenis vendor yang dicentang. */
-const rpFmt = n => 'Rp ' + Math.round(n).toLocaleString('id-ID');
-
-function hitungAlokasi() {
-  const blok = document.getElementById('alokasi');
-  if (!blok || blok.hidden) return;
-  const n = document.querySelectorAll('.vn-cek:checked').length;
-  const plafon = parseInt((document.getElementById('be').value || '0').replace(/\D/g, ''), 10) || 0;
-  document.getElementById('alokJml').textContent = n;
-  document.getElementById('alokPer').textContent = (n > 0 && plafon > 0) ? rpFmt(plafon / n) : '—';
-  document.getElementById('alokBar').style.width = Math.min(100, n * 100 / 12) + '%';
-}
-
-function terapkanTipe() {
-  const budgeting = document.querySelector('input[name="tipe_klien"]:checked')?.value === 'budgeting';
-  const be = document.getElementById('be');
-  if (!be) return;
-
-  document.getElementById('lblBudget').textContent = budgeting ? 'Plafon anggaran' : 'Perkiraan budget';
-  document.getElementById('hintBudget').innerHTML = budgeting
-    ? 'Batas atas yang <b>tidak boleh dilewati</b>. Vendor diisi sampai plafon habis, lalu berhenti.'
-    : 'Angka kasar dari klien. Tidak mengikat.';
-  be.required = budgeting;
-  be.style.borderColor = budgeting ? 'var(--ember-line)' : '';
-
-  const blok = document.getElementById('alokasi');
-  if (blok) blok.hidden = !budgeting;
-  hitungAlokasi();
-}
-
-document.querySelectorAll('input[name="tipe_klien"]').forEach(r => r.addEventListener('change', terapkanTipe));
-document.getElementById('be')?.addEventListener('input', hitungAlokasi);
-
-document.querySelectorAll('.vn-cek').forEach(cb => cb.addEventListener('change', hitungAlokasi));
-terapkanTipe();
-</script>
-<?= blokTop5Skrip() ?>
+  <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
+    <button class="btn solid" type="submit" name="lanjut" value="pl">Simpan &amp; siapkan price list →</button>
+    <button class="btn ghost" type="submit">Simpan saja</button>
+  </div>
 </form>
 
 <?php
@@ -2217,7 +2191,7 @@ else:
   $tahapTampil = $peranSaya === 'admin_office' ? ['deal','persiapan','harih'] : PIPE_ACTIVE;
 
   $nilai = (float) (one("SELECT COALESCE(SUM(deal_value),0) v FROM clients WHERE stage IN ('deal','persiapan','harih')")['v'] ?? 0);
-  $prospek = (float) (one("SELECT COALESCE(SUM(budget_estimate),0) v FROM clients WHERE stage IN ('baru','pricelist','spesifikasi','penawaran')")['v'] ?? 0);
+  $prospek = (float) (one("SELECT COALESCE(SUM(budget_estimate),0) v FROM clients WHERE stage IN ('baru','pricelist','dp')")['v'] ?? 0);
 
   pageHead('Klien',
            $peranSaya === 'admin_office'

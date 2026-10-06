@@ -76,7 +76,7 @@ function waCatatLog(string $arah, $payload, ?int $code = null): void
  * Tidak pernah melempar — kegagalan kirim harus terlihat di room, bukan
  * membuat halaman error.
  */
-function waKirim(string $nomor, string $teks): array
+function waKirim(string $nomor, string $teks, ?array $berkas = null): array
 {
     $n = waNomor($nomor);
     if ($n === '')  return ['ok' => false, 'id' => null, 'error' => 'Nomor tujuan tidak valid.'];
@@ -85,9 +85,11 @@ function waKirim(string $nomor, string $teks): array
 
     try {
         return match (waPenyedia()) {
-            'cloud'    => waKirimCloud($n, $teks),
+            'cloud'    => waKirimCloud($n, $teks, $berkas),
+            // Jembatan sendiri belum tentu bisa melampirkan berkas — tautan
+            // PDF-nya sudah ada di dalam teks, jadi cukup teksnya.
             'jembatan' => waKirimJembatan($n, $teks),
-            default    => waKirimGateway($n, $teks),
+            default    => waKirimGateway($n, $teks, $berkas),
         };
     } catch (Throwable $e) {
         return ['ok' => false, 'id' => null, 'error' => $e->getMessage()];
@@ -137,7 +139,7 @@ function waStatusJembatan(): array
 }
 
 /** Meta WhatsApp Cloud API. */
-function waKirimCloud(string $nomor, string $teks): array
+function waKirimCloud(string $nomor, string $teks, ?array $berkas = null): array
 {
     $url = 'https://graph.facebook.com/v21.0/' . rawurlencode(setting('wa_phone_id')) . '/messages';
     $r = httpJson('POST', $url, ['Authorization: Bearer ' . setting('wa_token')], [
@@ -147,6 +149,18 @@ function waKirimCloud(string $nomor, string $teks): array
         'type'              => 'text',
         'text'              => ['preview_url' => true, 'body' => $teks],
     ]);
+    // Dokumen dikirim sebagai pesan kedua: keterangan dokumen dibatasi 1024
+    // karakter, sedangkan teks penawaran sering lebih panjang.
+    if ($berkas && $r['code'] < 400) {
+        $d = httpJson('POST', $url, ['Authorization: Bearer ' . setting('wa_token')], [
+            'messaging_product' => 'whatsapp',
+            'recipient_type'    => 'individual',
+            'to'                => $nomor,
+            'type'              => 'document',
+            'document'          => ['link' => $berkas['url'], 'filename' => $berkas['nama'] ?? 'dokumen.pdf'],
+        ]);
+        waCatatLog('keluar', $d['raw'], $d['code']);
+    }
     waCatatLog('keluar', $r['raw'], $r['code']);
 
     if ($r['code'] >= 400) {
@@ -165,7 +179,7 @@ function waKirimCloud(string $nomor, string $teks): array
  * memakai nama berbeda — Fonnte memakai target/message, Wablas memakai
  * phone/message, dan seterusnya.
  */
-function waKirimGateway(string $nomor, string $teks): array
+function waKirimGateway(string $nomor, string $teks, ?array $berkas = null): array
 {
     $url    = setting('wa_gateway_url');
     $token  = setting('wa_gateway_token');
@@ -174,6 +188,12 @@ function waKirimGateway(string $nomor, string $teks): array
     $mode   = setting('wa_gateway_auth', 'header');   // header | body | bearer
 
     $data = [$fT => $nomor, $fB => $teks];
+    // Lampiran berkas. Fonnte memakai 'url' (alamat berkas yang bisa diunduh
+    // server mereka) dan 'filename'; gateway lain bisa diatur lewat settings.
+    if ($berkas && !empty($berkas['url'])) {
+        $data[setting('wa_gateway_ffile', 'url')]     = $berkas['url'];
+        $data[setting('wa_gateway_fname', 'filename')] = $berkas['nama'] ?? 'dokumen.pdf';
+    }
     $head = [];
     if ($mode === 'header')      $head[] = 'Authorization: ' . $token;
     elseif ($mode === 'bearer')  $head[] = 'Authorization: Bearer ' . $token;

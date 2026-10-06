@@ -77,6 +77,7 @@ footer a:hover{color:var(--ember)}
 <nav>
   <a class="brand" href="<?= url() ?>">Callalily<sup>PARTY · WEDDING ORGANIZER</sup></a>
   <div class="navr">
+    <a class="navlink" href="<?= url('pricelist') ?>">Price list</a>
     <a class="navlink" href="<?= url('galeri') ?>">Galeri pesta</a>
     <a class="navlink" href="<?= url('blog') ?>">Jurnal</a>
     <a class="btn solid" href="<?= url() ?>#susun">Susun harimu</a>

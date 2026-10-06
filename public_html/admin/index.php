@@ -3,6 +3,7 @@ require_once __DIR__ . '/_layout.php';
 require_once __DIR__ . '/../inc/pipeline.php';
 require_once __DIR__ . '/../inc/google.php';
 require_once __DIR__ . '/../inc/zoom.php';
+require_once __DIR__ . '/../inc/formulir.php';
 $user = requireLogin();
 
 /**
@@ -20,7 +21,9 @@ $early  = $peran === 'admin_early';
 $office = in_array($peran, ['admin_office', 'editor'], true);
 $owner  = !$early && !$office;
 
-$PRA_DEAL   = ['baru', 'pricelist', 'spesifikasi', 'penawaran'];
+// Pra-deal = bagian admin early: prospek → price list → menunggu DP.
+// DP 30% masuk = deal, dan klien pindah ke admin office.
+$PRA_DEAL   = ['baru', 'pricelist', 'dp'];
 $PASCA_DEAL = ['deal', 'persiapan', 'harih'];
 $tahapKu    = $early ? $PRA_DEAL : ($office ? $PASCA_DEAL : PIPE_ACTIVE);
 $inKu       = "'" . implode("','", $tahapKu) . "'";
@@ -37,8 +40,8 @@ if (!$office) {
     $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE stage IN ($inPra)"), 'd' => 'Prospek aktif', 'href' => 'klien.php'];
 }
 if ($early) {
-    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM meetings WHERE status='scheduled' AND start_at >= NOW()"), 'd' => 'Pertemuan mendatang', 'href' => 'jadwal.php'];
-    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE contract_signed_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')"), 'd' => 'Deal bulan ini', 'href' => 'klien.php?tahap=deal'];
+    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE stage = 'dp'"), 'd' => 'Menunggu DP', 'href' => 'klien.php?tahap=dp'];
+    $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE contract_signed_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')"), 'd' => 'Deal bulan ini (DP masuk)', 'href' => 'klien.php?tahap=deal'];
 }
 if ($office) {
     $stat[] = ['n' => (int) $v("SELECT COUNT(*) v FROM clients WHERE stage IN ($inPasca)"), 'd' => 'Acara berjalan', 'href' => 'klien.php'];
@@ -59,6 +62,15 @@ foreach (all("SELECT stage, COUNT(*) n FROM clients WHERE stage IN ($inKu) GROUP
 $tindakan = all("SELECT id, name, partner_name, next_action, next_action_at, stage FROM clients
                  WHERE stage IN ($inKu) AND next_action_at IS NOT NULL AND next_action_at <= CURDATE()
                  ORDER BY next_action_at ASC LIMIT 8");
+// DP yang sedang ditunggu: begitu masuk, klien diserahkan ke admin office.
+$dpTunggu = $office ? [] : all("SELECT c.id, c.name, c.partner_name, p.label, p.amount, p.due_date
+                 FROM clients c JOIN payments p ON p.id = (
+                     SELECT p2.id FROM payments p2 WHERE p2.client_id = c.id
+                     ORDER BY (p2.kode = 'dealing') DESC, p2.wajib DESC, p2.sort_order, p2.id LIMIT 1)
+                 WHERE c.stage = 'dp' AND p.paid_at IS NULL
+                 ORDER BY p.due_date ASC LIMIT 6");
+// Kiriman formulir yang gagal jadi klien — calon klien yang nyaris hilang.
+$formCek = $office ? [] : formPerluCek(30);
 $tanpaAksi = $office ? [] : all("SELECT id, name, partner_name, stage FROM clients
                   WHERE (next_action_at IS NULL OR next_action = '') AND stage IN ($inPra) LIMIT 6");
 $catatHasil = $office ? [] : all("SELECT id, client_name, start_at FROM meetings
@@ -69,7 +81,7 @@ $tugasTelat = $early ? [] : all("SELECT t.id, t.title, t.due_date, c.id cid, c.n
                    ORDER BY t.due_date ASC LIMIT 8");
 $tagihan = $early ? [] : all("SELECT p.id, p.label, p.amount, p.due_date, c.id cid, c.name FROM payments p
                 JOIN clients c ON c.id = p.client_id
-                WHERE p.paid_at IS NULL AND p.due_date <= DATE_ADD(CURDATE(), INTERVAL 3 DAY) AND c.stage <> 'batal'
+                WHERE p.paid_at IS NULL AND p.due_date <= DATE_ADD(CURDATE(), INTERVAL 3 DAY) AND c.stage NOT IN ('batal','dp')
                 ORDER BY p.due_date ASC LIMIT 6");
 $nextMeet = all("SELECT * FROM meetings WHERE status='scheduled' AND start_at >= NOW() ORDER BY start_at ASC LIMIT 4");
 $hariH    = $early ? [] : all("SELECT id, name, partner_name, wedding_date, venue FROM clients
@@ -78,14 +90,14 @@ $hariH    = $early ? [] : all("SELECT id, name, partner_name, wedding_date, venu
 $syncBad  = $owner ? all("SELECT id, client_name, sync_error FROM meetings WHERE sync_error IS NOT NULL AND status='scheduled' LIMIT 3") : [];
 $lowSeo   = $owner ? all("SELECT id, title, seo_score FROM posts WHERE status='published' AND seo_score < 70 ORDER BY seo_score ASC LIMIT 3") : [];
 
-$adaHariIni = $tindakan || $tanpaAksi || $tugasTelat || $tagihan || $catatHasil;
+$adaHariIni = $tindakan || $tanpaAksi || $tugasTelat || $tagihan || $catatHasil || $dpTunggu || $formCek;
 
 adminHead('Ringkasan', '');
 $aksiAtas = ($office ? '' : '<a class="btn solid" href="klien.php?new=1">+ Klien baru</a> ')
           . '<a class="btn ghost" href="jadwal.php?new=1">+ Jadwalkan</a>';
 pageHead('Selamat datang, ' . explode(' ', $user['name'])[0],
          hariID('now') . ', ' . tanggalID('now') . ' · ' . roleLabel($peran)
-         . ($early ? ' — prospek sampai deal.' : ($office ? ' — klien setelah deal.' : '.')),
+         . ($early ? ' — prospek sampai DP masuk.' : ($office ? ' — klien setelah DP masuk.' : '.')),
          $aksiAtas);
 ?>
 
@@ -122,6 +134,18 @@ pageHead('Selamat datang, ' . explode(' ', $user['name'])[0],
       </div>
     <?php endif; ?>
 
+    <?php if ($formCek): ?>
+      <span class="lab" style="color:var(--rose)">Kiriman formulir belum jadi klien</span>
+      <ul class="daftar">
+        <?php foreach (array_slice($formCek, 0, 5) as $f): ?>
+          <li>
+            <a href="formulir.php"><b><?= e($f['nama'] ?: $f['wa']) ?></b><span><?= e($f['pesan'] ?: 'Perlu dicek') ?> · <?= e($f['wa']) ?></span></a>
+            <span class="kapan telat"><?= e(labelHari(substr($f['created_at'], 0, 10))) ?></span>
+          </li>
+        <?php endforeach; ?>
+      </ul>
+    <?php endif; ?>
+
     <?php if ($tindakan): ?>
       <span class="lab">Tindak lanjut jatuh tempo</span>
       <ul class="daftar">
@@ -133,6 +157,19 @@ pageHead('Selamat datang, ' . explode(' ', $user['name'])[0],
             </a>
             <span class="pill draft"><?= e(stageLabel($t['stage'])) ?></span>
             <span class="kapan<?= $lewat ? ' telat' : '' ?>"><?= e(labelHari($t['next_action_at'])) ?></span>
+          </li>
+        <?php endforeach; ?>
+      </ul>
+    <?php endif; ?>
+
+    <?php if ($dpTunggu): ?>
+      <span class="lab">Menunggu DP — begitu masuk, serahkan ke admin office</span>
+      <ul class="daftar">
+        <?php foreach ($dpTunggu as $p): $lewat = $p['due_date'] && $p['due_date'] < date('Y-m-d'); ?>
+          <li>
+            <a href="klien.php?id=<?= (int) $p['id'] ?>"><b><?= e($p['name'] . ($p['partner_name'] ? ' & ' . $p['partner_name'] : '')) ?></b>
+              <span><?= e($p['label']) ?> · <?= rupiah((float) $p['amount']) ?></span></a>
+            <span class="kapan<?= $lewat ? ' telat' : '' ?>"><?= $p['due_date'] ? e(labelHari($p['due_date'])) : '—' ?></span>
           </li>
         <?php endforeach; ?>
       </ul>
