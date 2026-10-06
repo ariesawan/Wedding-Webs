@@ -5,7 +5,7 @@
  *
  *  1. Pengingat H-1 pertemuan  (dulu reminder.php — masih bisa dipanggil sendiri)
  *  2. Naikkan tahap klien otomatis: persiapan → hari-H → selesai
- *  3. Ingatkan termin pembayaran yang jatuh tempo
+ *  3. Pengingat pembayaran lewat WhatsApp (bila diaktifkan owner)
  *  4. Sinkronkan Google Spreadsheet bila diaktifkan
  */
 
@@ -39,20 +39,27 @@ try {
     $log('GAGAL memindahkan tahap: ' . $e->getMessage());
 }
 
-// ---------- 3. Termin jatuh tempo ----------
-try {
-    $jatuh = all("SELECT p.*, c.name, c.partner_name, c.email
-                  FROM payments p JOIN clients c ON c.id = p.client_id
-                  WHERE p.paid_at IS NULL AND p.due_date IS NOT NULL
-                    AND p.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 3 DAY)");
-    foreach ($jatuh as $p) {
-        clientLog((int) $p['client_id'], 'sistem', 'Termin mendekati jatuh tempo',
-                  $p['label'] . ' — ' . rupiah($p['amount']) . ', jatuh tempo ' . tanggalID($p['due_date']));
+// ---------- 3. Pengingat pembayaran ----------
+// Bawaan MATI (Pengaturan → Pengingat pembayaran). Paling banyak dua pesan per
+// termin — H-3 dan sekali setelah lewat tempo — lalu diserahkan ke manusia.
+if (setting('bayar_ingat_aktif', '0') === '1') {
+    try {
+        require_once dirname(__DIR__) . '/inc/bayar.php';
+        if ((int) (one("SELECT GET_LOCK('calla_ingat_bayar', 0) g")['g'] ?? 0) === 1) {
+            $hasil = bayarPengingatHarian(true);
+            foreach ($hasil as $h) $log('Pengingat ' . $h['jenis'] . ' → ' . $h['nama'] . ': ' . $h['status']);
+            $log(count($hasil) . ' klien diproses untuk pengingat pembayaran.');
+            q("SELECT RELEASE_LOCK('calla_ingat_bayar')");
+        } else {
+            $log('Pengingat pembayaran sedang berjalan di proses lain — dilewati.');
+        }
+    } catch (Throwable $e) {
+        $log('GAGAL mengirim pengingat pembayaran: ' . $e->getMessage());
     }
-    $log(count($jatuh) . ' termin pembayaran mendekati jatuh tempo (dicatat di riwayat klien).');
-} catch (Throwable $e) {
-    $log('GAGAL memeriksa pembayaran: ' . $e->getMessage());
+} else {
+    $log('Pengingat pembayaran otomatis tidak aktif.');
 }
+setting('cron_terakhir') !== date('Y-m-d') && settingSet('cron_terakhir', date('Y-m-d'));
 
 // ---------- 4. Sinkron spreadsheet ----------
 if (setting('sheet_autosync') === '1' && setting('sheet_enabled') === '1') {

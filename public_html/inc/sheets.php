@@ -161,14 +161,16 @@ function sheetsSyncAll(): array
     $out['Jadwal'] = count($rows) - 1;
 
     // ---------- Pembayaran ----------
-    $rows = [['ID','Klien','Termin','Nominal','Jatuh Tempo','Dibayar','Metode','Status','Catatan']];
+    $rows = [['ID','Klien','Termin','Nominal','Terbayar','Sisa','Jatuh Tempo','Lunas','Metode','Status','Catatan']];
     foreach (all("SELECT p.*, c.name, c.partner_name FROM payments p
                   JOIN clients c ON c.id = p.client_id
                   ORDER BY p.client_id, p.sort_order") as $p) {
         $nama = $p['name'] . ($p['partner_name'] ? ' & ' . $p['partner_name'] : '');
         $st = $p['paid_at'] ? 'Lunas'
-            : (($p['due_date'] && strtotime($p['due_date']) < time()) ? 'Terlambat' : 'Belum');
-        $rows[] = [$p['id'], $nama, $p['label'], (float) $p['amount'],
+            : (($p['due_date'] && strtotime($p['due_date']) < time()) ? 'Lewat tempo'
+              : ((float) $p['terbayar'] > 0 ? 'Sebagian' : 'Belum'));
+        $rows[] = [$p['id'], $nama, $p['label'], (float) $p['amount'], (float) $p['terbayar'],
+                   max(0, (float) $p['amount'] - (float) $p['terbayar']),
                    $tgl($p['due_date']), $tgl($p['paid_at']), $p['method'], $st, $p['note']];
     }
     sheetsWriteTab($id, 'Pembayaran', $rows);
@@ -208,7 +210,7 @@ function sheetsSyncAll(): array
         $rows[] = [$meta['label'], $stat($key), '', '', ''];
     }
     $tot = one("SELECT COALESCE(SUM(deal_value),0) v FROM clients WHERE stage NOT IN ('batal')");
-    $lun = one("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE paid_at IS NOT NULL");
+    $lun = one("SELECT COALESCE(SUM(terbayar),0) v FROM payments");
     $rows[] = [];
     $rows[] = ['Total nilai deal', (float) ($tot['v'] ?? 0)];
     $rows[] = ['Sudah diterima',   (float) ($lun['v'] ?? 0)];

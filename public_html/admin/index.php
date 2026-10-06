@@ -49,7 +49,7 @@ if ($office) {
 }
 if (!$early) {
     if ($owner) $stat[] = ['n' => rupiah($v("SELECT COALESCE(SUM(deal_value),0) v FROM clients WHERE stage IN ($inPasca)"), true) ?: '—', 'd' => 'Nilai terkunci', 'kecil' => true, 'href' => 'klien.php'];
-    $telat = $v("SELECT COALESCE(SUM(amount),0) v FROM payments p JOIN clients c ON c.id = p.client_id
+    $telat = $v("SELECT COALESCE(SUM(p.amount - p.terbayar),0) v FROM payments p JOIN clients c ON c.id = p.client_id
                  WHERE p.paid_at IS NULL AND p.due_date < CURDATE() AND c.stage <> 'batal'");
     $stat[] = ['n' => $telat > 0 ? rupiah($telat, true) : '—', 'd' => 'Tagihan lewat tempo', 'kecil' => true, 'merah' => $telat > 0];
 }
@@ -63,7 +63,7 @@ $tindakan = all("SELECT id, name, partner_name, next_action, next_action_at, sta
                  WHERE stage IN ($inKu) AND next_action_at IS NOT NULL AND next_action_at <= CURDATE()
                  ORDER BY next_action_at ASC LIMIT 8");
 // DP yang sedang ditunggu: begitu masuk, klien diserahkan ke admin office.
-$dpTunggu = $office ? [] : all("SELECT c.id, c.name, c.partner_name, p.label, p.amount, p.due_date
+$dpTunggu = $office ? [] : all("SELECT c.id, c.name, c.partner_name, p.label, (p.amount - p.terbayar) amount, p.due_date
                  FROM clients c JOIN payments p ON p.id = (
                      SELECT p2.id FROM payments p2 WHERE p2.client_id = c.id
                      ORDER BY (p2.kode = 'dealing') DESC, p2.wajib DESC, p2.sort_order, p2.id LIMIT 1)
@@ -79,7 +79,7 @@ $tugasTelat = $early ? [] : all("SELECT t.id, t.title, t.due_date, c.id cid, c.n
                    JOIN clients c ON c.id = t.client_id
                    WHERE t.done_at IS NULL AND t.due_date <= CURDATE() AND c.stage NOT IN ('selesai','batal')
                    ORDER BY t.due_date ASC LIMIT 8");
-$tagihan = $early ? [] : all("SELECT p.id, p.label, p.amount, p.due_date, c.id cid, c.name FROM payments p
+$tagihan = $early ? [] : all("SELECT p.id, p.label, (p.amount - p.terbayar) amount, p.due_date, c.id cid, c.name FROM payments p
                 JOIN clients c ON c.id = p.client_id
                 WHERE p.paid_at IS NULL AND p.due_date <= DATE_ADD(CURDATE(), INTERVAL 3 DAY) AND c.stage NOT IN ('batal','dp')
                 ORDER BY p.due_date ASC LIMIT 6");

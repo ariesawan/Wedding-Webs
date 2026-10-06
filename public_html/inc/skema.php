@@ -23,10 +23,10 @@
  * Semua langkah aman diulang: kolom diperiksa dulu di information_schema,
  * baris contoh hanya dibuat kalau belum ada. Kalau pengguna database tidak
  * punya hak ALTER, galatnya dicatat ke error_log dan panel menampilkan
- * peringatan — db/migration-v23.sql tetap bisa dijalankan manual.
+ * peringatan — db/migration-v24.sql tetap bisa dijalankan manual.
  */
 
-const SKEMA_VERSI = 23;
+const SKEMA_VERSI = 24;
 
 function skemaAdaKolom(string $tabel, string $kolom): bool
 {
@@ -118,6 +118,7 @@ function skemaPerbarui(): string
         // struktur v22 lengkap.
 
         skemaV23();
+        skemaV24();
 
         settingSet('skema_versi', (string) SKEMA_VERSI);
         settingSet('skema_galat', '');
@@ -212,6 +213,100 @@ function skemaV23(): void
         WHERE i.opsional = 0 AND i.harga <> 0 AND t.harga IS NOT NULL");
 
     skemaBenihPaket();
+}
+
+/**
+ * v24 — termin pembayaran & dashboard pengantin.
+ *
+ * Pembayaran: uang masuk dicatat per transfer di payment_receipts (bisa
+ * sebagian, bisa dibatalkan dengan alasan, punya nomor kwitansi). Kolom
+ * payments.terbayar adalah cache jumlah yang sudah diterima — hanya ditulis
+ * bayarHitungUlang() — sehingga semua query cukup memakai amount − terbayar.
+ * payments.offset_hari membekukan aturan "H-n" per klien: mengubah template
+ * tidak lagi menggeser jadwal klien lama, dan tanggal yang diubah tangan
+ * tidak tertimpa saat hari-H bergeser.
+ *
+ * Dashboard pengantin: satu token per klien (clients.portal_token), kapan
+ * pertama dibuka, dan kapan klien terakhir mengisi data.
+ */
+function skemaV24(): void
+{
+    $kolomBaru = fn(string $t, string $k) => !skemaAdaKolom($t, $k);
+
+    // ---- payments ----
+    $terbayarBaru = $kolomBaru('payments', 'terbayar');
+    skemaTambahKolom('payments', 'terbayar', "DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Cache jumlah penerimaan sah; hanya ditulis bayarHitungUlang()' AFTER amount");
+    $offsetBaru = $kolomBaru('payments', 'offset_hari');
+    skemaTambahKolom('payments', 'offset_hari', "INT NULL COMMENT 'Salinan payment_templates.offset_hari; NULL = tanggal tetap' AFTER due_date");
+    skemaTambahKolom('payments', 'ingat_kode', "VARCHAR(24) NOT NULL DEFAULT '' COMMENT 'Pengingat terakhir: sebelum@YYYY-MM-DD / telat@YYYY-MM-DD'");
+    skemaTambahKolom('payments', 'ingat_at', "DATETIME NULL COMMENT 'Kapan pengingat/tagihan terakhir dikirim'");
+
+    // ---- clients ----
+    skemaTambahKolom('clients', 'pengingat_bayar', "TINYINT(1) NOT NULL DEFAULT 1 COMMENT '0 = jangan kirim pengingat termin otomatis'");
+    skemaTambahKolom('clients', 'portal_token', "CHAR(32) NULL DEFAULT NULL COMMENT 'Tautan dashboard pengantin; NULL = belum dibuat / dimatikan'");
+    skemaTambahKolom('clients', 'portal_seen_at', "DATETIME NULL COMMENT 'Pertama kali dashboard dibuka klien'");
+    skemaTambahKolom('clients', 'portal_isi_at', "DATETIME NULL COMMENT 'Terakhir klien mengisi data lewat dashboard'");
+    if (!one("SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = 'clients' AND INDEX_NAME = 'uq_clients_portal'")) {
+        try { db()->exec("ALTER TABLE clients ADD UNIQUE KEY uq_clients_portal (portal_token)"); }
+        catch (PDOException $e) { if (!str_contains($e->getMessage(), 'Duplicate key name')) throw $e; }
+    }
+
+    // ---- client_wedding_info: isian dari pengantin ----
+    skemaTambahKolom('client_wedding_info', 'dekor_klien', "TEXT NULL COMMENT 'Keinginan & referensi dekor dari pengantin (dashboard)'");
+    skemaTambahKolom('client_wedding_info', 'pria_nama', "VARCHAR(190) NOT NULL DEFAULT '' COMMENT 'Nama lengkap bergelar untuk undangan'");
+    skemaTambahKolom('client_wedding_info', 'wanita_nama', "VARCHAR(190) NOT NULL DEFAULT '' COMMENT 'Nama lengkap bergelar untuk undangan'");
+
+    // ---- penerimaan ----
+    $penerimaanBaru = !skemaAdaTabel('payment_receipts');
+    db()->exec("CREATE TABLE IF NOT EXISTS `payment_receipts` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `client_id` INT UNSIGNED NOT NULL,
+        `payment_id` INT UNSIGNED NOT NULL COMMENT 'Termin tempat alokasi ini masuk',
+        `kwitansi_no` VARCHAR(30) NOT NULL DEFAULT '' COMMENT 'Sama untuk semua alokasi dari satu transfer; kosong = data lama',
+        `tanggal` DATE NOT NULL COMMENT 'Tanggal dana diterima',
+        `jumlah` DECIMAL(14,2) NOT NULL,
+        `metode` VARCHAR(60) NOT NULL DEFAULT '',
+        `pengirim` VARCHAR(120) NOT NULL DEFAULT '' COMMENT 'Pemilik rekening pengirim, tercetak di kwitansi',
+        `bukti` VARCHAR(190) NULL COMMENT 'Path relatif di folder bukti privat',
+        `status` ENUM('sah','menunggu','ditolak','batal') NOT NULL DEFAULT 'sah',
+        `sumber` ENUM('admin','portal','migrasi') NOT NULL DEFAULT 'admin',
+        `pesan_klien` VARCHAR(400) NOT NULL DEFAULT '',
+        `alasan_tolak` VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'Dibaca klien',
+        `catatan` VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'Internal — tidak pernah tampil ke klien',
+        `user_id` INT UNSIGNED NULL,
+        `batal_at` DATETIME NULL,
+        `batal_oleh` INT UNSIGNED NULL,
+        `batal_alasan` VARCHAR(255) NOT NULL DEFAULT '',
+        `kwitansi_wa_at` DATETIME NULL,
+        `dicek_at` DATETIME NULL,
+        `dicek_oleh` INT UNSIGNED NULL,
+        `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (`id`),
+        KEY `idx_pr_payment` (`payment_id`, `status`),
+        KEY `idx_pr_client` (`client_id`, `tanggal`),
+        KEY `idx_pr_kw` (`kwitansi_no`),
+        KEY `idx_pr_status` (`status`, `created_at`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // Data lama: termin yang sudah ditandai lunas jadi satu penerimaan tanpa
+    // nomor kwitansi (tidak pernah dikirim otomatis). Tanggal masa depan —
+    // dulu bisa diketik bebas — dijepit ke hari ini.
+    if ($penerimaanBaru) {
+        q("INSERT INTO payment_receipts (client_id, payment_id, kwitansi_no, tanggal, jumlah, metode, status, sumber, catatan)
+           SELECT p.client_id, p.id, '', LEAST(p.paid_at, CURDATE()), p.amount, p.method, 'sah', 'migrasi',
+                  CONCAT('migrasi v24; tanggal asli ', p.paid_at)
+             FROM payments p
+            WHERE p.paid_at IS NOT NULL AND p.amount > 0
+              AND NOT EXISTS (SELECT 1 FROM payment_receipts r WHERE r.payment_id = p.id)");
+    }
+    if ($terbayarBaru) {
+        q("UPDATE payments SET terbayar = amount, paid_at = LEAST(paid_at, CURDATE()) WHERE paid_at IS NOT NULL");
+    }
+    if ($offsetBaru && skemaAdaTabel('payment_templates')) {
+        q("UPDATE payments p JOIN payment_templates t ON t.kode = p.kode AND p.kode <> ''
+              SET p.offset_hari = t.offset_hari");
+    }
 }
 
 /**

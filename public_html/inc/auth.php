@@ -46,7 +46,7 @@ const AKSES_PERAN = [
     'admin_early' => [
         'index', 'klien', 'chat', 'chat-api', 'wa-sesi', 'jadwal', 'cek-bentrok',
         'inbox', 'penyusun', 'analisa', 'alert-api', 'oauth-callback', 'logout',
-        'penawaran', 'template-penawaran', 'paket', 'formulir',
+        'penawaran', 'template-penawaran', 'paket', 'formulir', 'bukti',
     ],
     'admin_office' => [
         'index', 'klien', 'chat', 'chat-api', 'wa-sesi', 'jadwal', 'cek-bentrok',
@@ -54,7 +54,7 @@ const AKSES_PERAN = [
         'event', 'vendor', 'vendor-kategori', 'galeri',
         // Office membuka penawaran untuk MEMBACA riwayat tawar-menawar —
         // penjagaan sunting ada di dalam halamannya, bukan di sini.
-        'penawaran',
+        'penawaran', 'bukti',
     ],
 ];
 

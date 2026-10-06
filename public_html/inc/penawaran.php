@@ -203,7 +203,13 @@ function quoteData(int $quoteId): ?array
         'isi'      => kelompokkan($isi),
         'tambahan' => $tambahan,
         'opsi'     => $opsi,
-        'termin'   => (float) $qq['total'] > 0 ? terminKlien((float) $qq['total'], $qq['wedding_date']) : [],
+        // Klien yang sudah DP punya jadwal pembayaran nyata (bisa sudah dicicil,
+        // digeser, ditambah). Menghitung ulang dari template di sini membuat DP
+        // yang lunas berbulan-bulan lalu tampil "jatuh tempo 3 hari lagi" —
+        // jadwal yang berlaku ada di dashboard pengantin.
+        'termin'   => (float) $qq['total'] > 0 && !stageSudahDeal((string) $qq['stage'])
+                      ? terminKlien((float) $qq['total'], $qq['wedding_date']) : [],
+        'sudahDeal'=> stageSudahDeal((string) $qq['stage']),
         'rekening' => rekeningBaris(),
         'wa'       => waNomorPic((string) $qq['stage']),
         'urlHal'   => url('penawaran.php?t=' . $qq['token']),
@@ -388,8 +394,8 @@ function quoteCocok(int $quoteId, ?int $userId = null): array
     $ganti = !stageSudahDeal($qq['stage']) || $dariCocok;
     $nilai = $ganti ? $total : (float) ($qq['deal_value'] ?? 0) + $total;
 
-    $lunas = (float) (one("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE client_id = ? AND paid_at IS NOT NULL",
-                          [$cid])['v'] ?? 0);
+    // Cicilan ikut dihitung: yang sudah diterima, bukan hanya termin yang lunas.
+    $lunas = (float) (one("SELECT COALESCE(SUM(terbayar),0) v FROM payments WHERE client_id = ?", [$cid])['v'] ?? 0);
     if ($nilai < $lunas) {
         throw new RuntimeException('Nilai kontrak baru (' . rupiah($nilai) . ') lebih kecil daripada yang sudah dibayar ('
             . rupiah($lunas) . '). Periksa dulu termin di tab Pembayaran.');

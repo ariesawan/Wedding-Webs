@@ -45,6 +45,8 @@ RewriteRule ^ form.php [L,QSA]
 
 RewriteRule ^sitemap\.xml$ sitemap.php [L]
 RewriteRule ^pricelist$  pricelist.php [L]
+# Dashboard pengantin: /p/{token 32 heksadesimal}
+RewriteRule ^p/([a-f0-9]{32})$ portal.php?t=$1 [L,QSA]
 RewriteRule ^galeri$     galeri.php  [L]
 RewriteRule ^blog$       blog.php    [L]
 

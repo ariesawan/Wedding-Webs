@@ -270,6 +270,12 @@ function quotePdf(int $quoteId): string
     }
 
     // ---------- Pembayaran ----------
+    if (!$d['termin'] && !empty($d['sudahDeal'])) {
+        $pdf->judul('Pembayaran');
+        $pdf->SetFont('Helvetica', '', 9);
+        $pdf->warna(PdfPenawaran::ABU);
+        $pdf->MultiCell($lebar, 4.8, pdfTeks('Jadwal pembayaran yang berlaku — termasuk yang sudah dibayar — ada di dashboard pengantin kalian.'), 0, 'L');
+    }
     if ($d['termin']) {
         $pdf->judul('Pembayaran');
         $pdf->SetFont('Helvetica', '', 7.5);

@@ -169,6 +169,9 @@ $waNo = $d['wa'];
       <?php endforeach; ?>
     </tbody></table>
     <?php if ($d['rekening']): ?><p style="margin:10px 0 0"><b>Transfer ke:</b> <?= e(implode(' ', $d['rekening'])) ?></p><?php endif; ?>
+  <?php elseif (!empty($d['sudahDeal'])): ?>
+    <h3>Pembayaran</h3>
+    <p>Jadwal pembayaran yang berlaku — termasuk yang sudah dibayar — ada di dashboard pengantin kalian. Tautannya dikirim PIC lewat WhatsApp.</p>
   <?php endif; ?>
 
   <?php if (trim((string) $q['catatan']) !== ''): ?>

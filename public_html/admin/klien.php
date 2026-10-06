@@ -6,6 +6,8 @@ require_once __DIR__ . '/../inc/chat.php';
 require_once __DIR__ . '/../partials/blok-top5.php';
 require_once __DIR__ . '/../inc/wa.php';
 require_once __DIR__ . '/../inc/penawaran.php';
+require_once __DIR__ . '/../inc/bayar.php';
+require_once __DIR__ . '/../inc/portal.php';
 $user = requireLogin();
 
 /**
@@ -181,17 +183,20 @@ function simpanDataLengkap(int $id, int $userId): void
     };
     q("INSERT INTO client_wedding_info
         (client_id, pria_anak_ke, pria_dari, pria_alamat,
-         wanita_anak_ke, wanita_dari, wanita_alamat)
-       VALUES (?,?,?,?,?,?,?)
+         wanita_anak_ke, wanita_dari, wanita_alamat, pria_nama, wanita_nama)
+       VALUES (?,?,?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE
          pria_anak_ke=VALUES(pria_anak_ke),     pria_dari=VALUES(pria_dari),
          pria_alamat=VALUES(pria_alamat),
          wanita_anak_ke=VALUES(wanita_anak_ke), wanita_dari=VALUES(wanita_dari),
-         wanita_alamat=VALUES(wanita_alamat)",
+         wanita_alamat=VALUES(wanita_alamat),
+         pria_nama=VALUES(pria_nama), wanita_nama=VALUES(wanita_nama)",
       [$id, $angka('pria_anak_ke'), $angka('pria_dari'),
        mb_substr(trim($_POST['pria_alamat'] ?? ''), 0, 255),
        $angka('wanita_anak_ke'), $angka('wanita_dari'),
-       mb_substr(trim($_POST['wanita_alamat'] ?? ''), 0, 255)]);
+       mb_substr(trim($_POST['wanita_alamat'] ?? ''), 0, 255),
+       mb_substr(trim($_POST['pria_nama'] ?? ''), 0, 190),
+       mb_substr(trim($_POST['wanita_nama'] ?? ''), 0, 190)]);
 
     // Prosesi adat. UPDATE terpisah, bukan lewat simpanBaseInfo(): fungsi itu
     // menulis seluruh baris termasuk tanggal akad dan resepsi, sedangkan
@@ -288,6 +293,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($ada('budget_estimate')) $data['budget_estimate'] = $uang('budget_estimate');
             if ($ada('deal_value'))      $data['deal_value']      = $uang('deal_value');
+            $nilaiLama = $id ? (float) (one("SELECT deal_value FROM clients WHERE id = ?", [$id])['deal_value'] ?? 0) : 0;
 
             // Hari-H, jam, dan venue diturunkan dari Base information: resepsi
             // dulu, lalu akad. Satu fakta, satu tempat — kalau tanggal nikah
@@ -326,11 +332,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($id) {
                 $lama = one("SELECT wedding_date FROM clients WHERE id = ?", [$id]);
                 if (!$lama) throw new RuntimeException('Klien tidak ditemukan.');
+                if (isset($data['deal_value']) && abs((float) $data['deal_value'] - $nilaiLama) >= 0.5) {
+                    // Nilai kontrak dari form harus tetap di atas yang sudah dibayar.
+                    $sudah = (float) (one("SELECT COALESCE(SUM(terbayar),0) v FROM payments WHERE client_id = ?", [$id])['v'] ?? 0);
+                    if ((float) $data['deal_value'] + 0.5 < $sudah)
+                        throw new RuntimeException('Nilai deal tidak boleh di bawah yang sudah dibayar (' . rupiah($sudah) . ').');
+                }
                 if ($data) {
                     $set = implode(', ', array_map(fn($k) => "`$k` = ?", array_keys($data)));
                     q("UPDATE clients SET $set WHERE id = ?", [...array_values($data), $id]);
                 }
                 flash('Data klien tersimpan.');
+                if (isset($data['deal_value']) && abs((float) $data['deal_value'] - $nilaiLama) >= 0.5
+                    && one("SELECT 1 FROM payments WHERE client_id = ? LIMIT 1", [$id])) {
+                    $nt = terminSesuaikan($id);
+                    flash('Data klien tersimpan. Nilai deal berubah' . ($nt ? " — $nt termin yang belum lunas disesuaikan." : '.'));
+                }
 
                 // Tanggal nikah bergeser -> seluruh checklist ikut digeser.
                 $tglBaru = $data['wedding_date'] ?? null;
@@ -406,6 +423,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         elseif ($act === 'datalengkap') {
             $id = (int) ($_POST['id'] ?? 0);
             if (!$id) throw new RuntimeException('Klien tidak ditemukan.');
+            // Klien bisa mengisi data keluarga & prosesi lewat dashboard
+            // pengantin. Kalau isinya berubah sejak formulir ini dibuka,
+            // menyimpan akan menimpa (atau menghapus) isian klien.
+            if (isset($_POST['portal_v'])) {
+                $vSekarang = portalVersi($id, 'keluarga') . '|' . portalVersi($id, 'prosesi');
+                if (!hash_equals($vSekarang, (string) $_POST['portal_v'])) {
+                    throw new RuntimeException('Klien baru saja mengubah data lewat dashboard pengantin — muat ulang halaman, periksa, lalu simpan lagi.');
+                }
+            }
 
             // Usia dan pekerjaan hidup di tabel clients, bukan wedding_info.
             $set = []; $par = [];
@@ -430,21 +456,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             simpanDataLengkap($id, (int) $user['id']);
 
             if ($baru) clientLog($id, 'catatan', 'Data lengkap mulai diisi', '', $user['id']);
+            try { q("UPDATE clients SET portal_isi_at = NULL WHERE id = ?", [$id]); } catch (Throwable $e) {}
             flash('Data lengkap tersimpan.');
             redirect('admin/klien.php?id=' . $id . '#datalengkap');
         }
 
         elseif ($act === 'dp_masuk') {
-            // DP 30% masuk = serah terima ke admin office. Satu tombol, satu
-            // pintu: termin DP ditandai lunas, klien deal, event dibuat.
+            // DP masuk = serah terima ke admin office — kalau LUNAS PENUH.
+            // Uangnya dicatat lewat bayarCatat (kwitansi + bisa sebagian).
             $id = (int) ($_POST['id'] ?? 0);
             if (!in_array($user['role'] ?? '', ['owner', 'admin_early'], true))
                 throw new RuntimeException('Konfirmasi DP dilakukan admin early atau owner.');
+            $bukti = !empty($_FILES['bukti']['name']) ? buktiSimpan($_FILES['bukti']) : null;
             $r = dpDiterima($id, (int) $user['id'], (string) ($_POST['tanggal'] ?? ''),
-                            mb_substr(trim((string) ($_POST['metode'] ?? '')), 0, 60));
-            flash($r['dp']['label'] . ' ' . rupiah((float) $r['dp']['amount']) . ' tercatat masuk. '
-                . 'Klien sekarang Deal dan dipegang admin office.'
-                . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
+                            (string) ($_POST['metode'] ?? ''), [
+                                'jumlah'   => (float) preg_replace('/\D/', '', (string) ($_POST['jumlah'] ?? '')),
+                                'pengirim' => (string) ($_POST['pengirim'] ?? ''),
+                                'bukti'    => $bukti,
+                            ]);
+            $pesan = $r['lunas']
+                ? $r['dp']['label'] . ' lunas. Klien sekarang Deal dan dipegang admin office.'
+                : 'Pembayaran DP dicatat.';
+            if (!empty($r['kwitansi']) && !empty($_POST['kirim_kwitansi'])) {
+                $k = bayarKirimKwitansi((int) $r['kwitansi']['id'], (int) $user['id']);
+                $pesan .= !empty($k['ok']) ? ' Kwitansi ' . $r['kwitansi']['kwitansi'] . ' terkirim ke WhatsApp klien.'
+                        : ' Kwitansi belum terkirim (' . ($k['error'] ?? '?') . ') — kirim dari tab Pembayaran.';
+            }
+            if ($r['lunas'] && !empty($_POST['kirim_portal']) && function_exists('portalKirim')) {
+                $kp = portalKirim($id, (int) $user['id']);
+                $pesan .= !empty($kp['ok']) ? ' Tautan dashboard pengantin terkirim.' : ' Tautan dashboard belum terkirim — kirim dari kartu Dashboard pengantin.';
+            }
+            flash($pesan . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
             redirect('admin/klien.php?id=' . $id);
         }
 
@@ -457,6 +499,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             clientLog($id, 'catatan', 'Konsep dekor diperbarui', mb_strimwidth($konsep, 0, 160, '…'), $user['id']);
             flash('Konsep dekor tersimpan.');
             redirect('admin/klien.php?id=' . $id . '#dekor');
+        }
+
+        elseif (str_starts_with($act, 'portal_')) {
+            $id = (int) ($_POST['id'] ?? 0);
+            $cP = one("SELECT id, stage FROM clients WHERE id = ?", [$id]);
+            if (!$cP) throw new RuntimeException('Klien tidak ditemukan.');
+            if (!stageSudahDeal($cP['stage'])) throw new RuntimeException('Dashboard pengantin aktif setelah DP lunas.');
+            $kelola = in_array($user['role'] ?? '', ['owner', 'admin_office'], true);
+            if ($act === 'portal_kirim') {
+                $r = portalKirim($id, (int) $user['id']);
+                if (!empty($r['ok'])) flash('Tautan dashboard pengantin terkirim ke WhatsApp klien.');
+                else { $_SESSION['wa_url_portal'] = $r['wa_url'] ?? ''; flash(($r['error'] ?? 'Belum terkirim.') . ' Tekan "Buka WhatsApp" untuk mengirim manual.', 'warn'); }
+            } elseif ($act === 'portal_buat') {
+                portalToken($id);
+                flash('Tautan dashboard pengantin siap — salin dari kartu di bawah.');
+            } elseif ($act === 'portal_putar') {
+                if (!$kelola) throw new RuntimeException('Mengganti tautan hanya untuk owner atau admin office.');
+                portalPutar($id);
+                logAudit((int) $user['id'], 'portal_putar', 'clients#' . $id);
+                clientLog($id, 'sistem', 'Tautan dashboard pengantin diganti', 'Tautan lama tidak berlaku lagi.', (int) $user['id']);
+                flash('Tautan baru dibuat — tautan lama langsung mati. Kirim ulang ke klien.');
+            } elseif ($act === 'portal_matikan') {
+                if (!$kelola) throw new RuntimeException('Mematikan tautan hanya untuk owner atau admin office.');
+                portalMatikan($id);
+                logAudit((int) $user['id'], 'portal_matikan', 'clients#' . $id);
+                clientLog($id, 'sistem', 'Tautan dashboard pengantin dimatikan', '', (int) $user['id']);
+                flash('Tautan dashboard pengantin dimatikan.');
+            } else {
+                throw new RuntimeException('Aksi tidak dikenal.');
+            }
+            redirect('admin/klien.php?id=' . $id . '#portal');
         }
 
         elseif ($act === 'stage') {
@@ -601,17 +674,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('admin/klien.php?id=' . $id . '#checklist');
         }
 
-        elseif ($act === 'pay_generate') {
-            $id = (int) $_POST['id'];
-            $c0 = one("SELECT deal_value FROM clients WHERE id = ?", [$id]);
-            if (!$c0 || (float) $c0['deal_value'] <= 0)
-                throw new RuntimeException('Nilai deal belum diisi. Isi dulu di tab Data klien.');
-            $n = terminSusun($id);
-            if ($n) clientLog($id, 'bayar', "Termin disusun dari template ($n termin)", rupiah((float) $c0['deal_value']), $user['id']);
-            flash($n ? "Termin pembayaran disusun dari template ($n termin)." : 'Termin sudah ada — hapus dulu kalau mau disusun ulang.');
-            redirect('admin/klien.php?id=' . $id . '#uang');
-        }
-
         elseif ($act === 'task_toggle') {
             $tid = (int) $_POST['task_id'];
             $t   = one("SELECT * FROM client_tasks WHERE id = ? AND client_id = ?", [$tid, (int) $_POST['id']]);
@@ -637,48 +699,166 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('admin/klien.php?id=' . (int) $_POST['id'] . '#checklist');
         }
 
-        elseif ($act === 'pay_save') {
-            $id  = (int) $_POST['id'];
+        elseif (str_starts_with($act, 'pay_')) {
+            // ---- Termin & pembayaran: semua lewat inc/bayar.php ----
+            $id = (int) ($_POST['id'] ?? 0);
+            $cB = one("SELECT id, stage, deal_value FROM clients WHERE id = ?", [$id]);
+            if (!$cB) throw new RuntimeException('Klien tidak ditemukan.');
             $pid = (int) ($_POST['payment_id'] ?? 0);
-            $amt = (float) preg_replace('/\D/', '', $_POST['amount'] ?? '0');
-            $par = [trim($_POST['label'] ?? 'Termin'), $amt, trim($_POST['due_date'] ?? '') ?: null,
-                    trim($_POST['paid_at'] ?? '') ?: null, trim($_POST['method'] ?? ''), trim($_POST['note'] ?? '')];
-            if ($pid) {
-                q("UPDATE payments SET label=?, amount=?, due_date=?, paid_at=?, method=?, note=? WHERE id=? AND client_id=?", [...$par, $pid, $id]);
-            } else {
+            $pB  = $pid ? one("SELECT * FROM payments WHERE id = ? AND client_id = ?", [$pid, $id]) : null;
+            if ($pid && !$pB) throw new RuntimeException('Termin tidak ditemukan.');
+            $dpB = terminDp($id);
+            $isDp = $pB ? ($dpB && (int) $dpB['id'] === (int) $pB['id']) : ($cB['stage'] === 'dp');
+            if (!bayarBoleh($user, $cB['stage'], $isDp)) {
+                throw new RuntimeException($cB['stage'] === 'dp' || !stageSudahDeal($cB['stage'])
+                    ? 'Pembayaran sebelum deal (DP) dicatat admin early atau owner.'
+                    : 'Pembayaran klien yang sudah deal dicatat admin office atau owner.');
+            }
+            $ke = 'admin/klien.php?id=' . $id . '#uang';
+
+            if ($act === 'pay_catat' || $act === 'pay_paid') {
+                // pay_paid = jalan pintas "Tandai lunas": sisa termin itu, hari ini.
+                if ($act === 'pay_paid') {
+                    if (!$pB || $pB['paid_at']) throw new RuntimeException('Termin ini sudah lunas.');
+                    $jumlah = bayarSisa($pB); $tgl = date('Y-m-d'); $metode = 'Transfer bank';
+                } else {
+                    $jumlah = (float) preg_replace('/\D/', '', (string) ($_POST['jumlah'] ?? ''));
+                    $tgl    = (string) ($_POST['tanggal'] ?? date('Y-m-d'));
+                    $metode = (string) ($_POST['metode'] ?? 'Transfer bank');
+                }
+                $bukti = !empty($_FILES['bukti']['name']) ? buktiSimpan($_FILES['bukti']) : null;
+                // DP saat Menunggu DP lewat dpDiterima: tahap & serah terima ikut.
+                $dpTerpilih = $dpB && (!$pB || (int) $pB['id'] === (int) $dpB['id']) && !$dpB['paid_at'];
+                if ($cB['stage'] === 'dp' && $dpTerpilih) {
+                    $r = dpDiterima($id, (int) $user['id'], $tgl, $metode,
+                                    ['jumlah' => $jumlah, 'pengirim' => $_POST['pengirim'] ?? '', 'bukti' => $bukti,
+                                     'catatan' => $_POST['catatan'] ?? '']);
+                    $hasil = $r['kwitansi'];
+                    $pesan = $r['lunas'] ? 'DP lunas — klien sekarang Deal dan dipegang admin office.' : 'Pembayaran DP dicatat.';
+                    $pesan .= $r['info'] ? "\n" . implode("\n", $r['info']) : '';
+                } else {
+                    $hasil = bayarCatat($id, $jumlah, $tgl, $metode, [
+                        'payment_id' => $pid, 'pengirim' => $_POST['pengirim'] ?? '', 'bukti' => $bukti,
+                        'catatan' => $_POST['catatan'] ?? '', 'user_id' => (int) $user['id'],
+                    ]);
+                    $pesan = rupiah($jumlah) . ' dicatat (' . $hasil['kwitansi'] . '): ' . $hasil['ringkas'] . '.';
+                }
+                if ($hasil && !empty($_POST['kirim_kwitansi'])) {
+                    $k = bayarKirimKwitansi((int) $hasil['id'], (int) $user['id']);
+                    $pesan .= !empty($k['ok']) ? ' Kwitansi terkirim ke WhatsApp klien.'
+                            : ' Kwitansi belum terkirim: ' . ($k['error'] ?? '?');
+                }
+                flash($pesan);
+                redirect($act === 'pay_paid' && $cB['stage'] === 'dp' ? 'admin/klien.php?id=' . $id : $ke);
+            }
+
+            if ($act === 'pay_batal') {
+                $boleh = ($user['role'] ?? '') === 'owner';
+                $rr = one("SELECT user_id, created_at FROM payment_receipts WHERE id = ? AND client_id = ?", [(int) $_POST['receipt_id'], $id]);
+                if (!$boleh && $rr && (int) $rr['user_id'] === (int) $user['id'] && strtotime($rr['created_at']) > time() - 86400) $boleh = true;
+                if (!$boleh) throw new RuntimeException('Pembatalan penerimaan hanya oleh owner, atau oleh pencatatnya dalam 24 jam.');
+                $r = bayarBatal($id, (int) $_POST['receipt_id'], (string) ($_POST['alasan'] ?? ''), (int) $user['id']);
+                flash('Penerimaan ' . rupiah($r['total']) . ' dibatalkan.' . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''), $r['info'] ? 'warn' : 'ok');
+                redirect($ke);
+            }
+
+            if ($act === 'pay_kirim_kwitansi') {
+                $k = bayarKirimKwitansi((int) $_POST['receipt_id'], (int) $user['id']);
+                if (!empty($k['ok'])) flash('Kwitansi terkirim ke WhatsApp klien.');
+                elseif (!empty($k['wa_url'])) { $_SESSION['wa_url'] = $k['wa_url']; flash('Gateway WhatsApp belum tersambung — tekan "Buka WhatsApp" untuk mengirim manual.', 'warn'); }
+                else throw new RuntimeException($k['error'] ?? 'Kwitansi gagal dikirim.');
+                redirect($ke);
+            }
+
+            if ($act === 'pay_kirim_tagihan') {
+                $ids = $pid ? [$pid] : array_map('intval', (array) ($_POST['payment_ids'] ?? []));
+                $k = bayarKirimTagihan($id, $ids, (int) $user['id']);
+                if (!empty($k['ok'])) flash('Tagihan terkirim ke WhatsApp klien.');
+                elseif (!empty($k['wa_url'])) { $_SESSION['wa_url'] = $k['wa_url']; flash('Gateway WhatsApp belum tersambung — tekan "Buka WhatsApp" untuk mengirim manual.', 'warn'); }
+                else throw new RuntimeException($k['error'] ?? 'Tagihan gagal dikirim.');
+                redirect($ke);
+            }
+
+            if ($act === 'pay_save') {
+                // Termin BARU (manual). Uang tidak pernah dicatat dari sini.
+                $amt = (float) preg_replace('/\D/', '', $_POST['amount'] ?? '0');
+                $label = mb_substr(trim((string) ($_POST['label'] ?? '')), 0, 80);
+                if ($label === '' || $amt <= 0) throw new RuntimeException('Nama dan nominal termin wajib diisi.');
                 $max = (int) (one("SELECT COALESCE(MAX(sort_order),0) m FROM payments WHERE client_id = ?", [$id])['m'] ?? 0);
-                q("INSERT INTO payments (client_id, label, amount, due_date, paid_at, method, note, sort_order)
-                   VALUES (?,?,?,?,?,?,?,?)", [$id, ...$par, $max + 10]);
+                q("INSERT INTO payments (client_id, label, amount, due_date, note, sort_order, persen)
+                   VALUES (?,?,?,?,?,?,NULL)",
+                  [$id, $label, $amt, trim($_POST['due_date'] ?? '') ?: null, mb_substr(trim($_POST['note'] ?? ''), 0, 255), $max + 10]);
+                clientLog($id, 'bayar', 'Termin ditambah: ' . $label . ' ' . rupiah($amt), '', (int) $user['id']);
+                flash('Termin ditambah. Total termin sekarang bisa berbeda dari nilai kontrak — lihat peringatan di atas tabel.');
+                redirect($ke);
             }
-            flash('Termin pembayaran disimpan.');
-            redirect('admin/klien.php?id=' . $id . '#uang');
-        }
 
-        elseif ($act === 'pay_paid') {
-            $pid = (int) $_POST['payment_id'];
-            $p   = one("SELECT * FROM payments WHERE id = ? AND client_id = ?", [$pid, (int) $_POST['id']]);
-            if (!$p) throw new RuntimeException('Termin tidak ditemukan.');
-            // Termin DP ditandai lunas saat klien menunggu DP = serah terima.
-            // Lewat dpDiterima supaya tahap, event, dan pegangan ikut pindah.
-            $cDp = one("SELECT stage FROM clients WHERE id = ?", [(int) $p['client_id']]);
-            if (!$p['paid_at'] && ($cDp['stage'] ?? '') === 'dp' && (int) (terminDp((int) $p['client_id'])['id'] ?? 0) === $pid) {
-                if (!in_array($user['role'] ?? '', ['owner', 'admin_early'], true))
-                    throw new RuntimeException('Konfirmasi DP dilakukan admin early atau owner.');
-                $r = dpDiterima((int) $p['client_id'], (int) $user['id']);
-                flash($p['label'] . ' diterima — klien sekarang Deal dan dipegang admin office.'
-                    . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
-                redirect('admin/klien.php?id=' . (int) $p['client_id']);
+            if ($act === 'pay_ubah') {
+                if (!$pB) throw new RuntimeException('Termin tidak ditemukan.');
+                if ($pB['paid_at']) throw new RuntimeException('Termin yang sudah lunas tidak bisa diubah. Batalkan penerimaannya dulu bila salah.');
+                $label = mb_substr(trim((string) ($_POST['label'] ?? '')), 0, 80) ?: $pB['label'];
+                $amt   = ($_POST['amount'] ?? '') !== '' ? (float) preg_replace('/\D/', '', (string) $_POST['amount']) : (float) $pB['amount'];
+                if ($amt + 0.5 < (float) $pB['terbayar']) throw new RuntimeException('Nominal tidak boleh di bawah yang sudah dibayar (' . rupiah((float) $pB['terbayar']) . ').');
+                $due    = trim((string) ($_POST['due_date'] ?? '')) ?: null;
+                $persen = abs($amt - (float) $pB['amount']) >= 0.5 ? null : $pB['persen'];   // diubah tangan = nominal tetap
+                $offset = $pB['offset_hari'];
+                if ($due !== $pB['due_date']) $offset = null;                                 // tanggal manual
+                if (!empty($_POST['ikut_harih'])) {
+                    $t = $pB['kode'] !== '' ? one("SELECT offset_hari FROM payment_templates WHERE kode = ?", [$pB['kode']]) : null;
+                    $offset = $t && $t['offset_hari'] !== null ? (int) $t['offset_hari'] : null;
+                    $wd = one("SELECT wedding_date FROM clients WHERE id = ?", [$id])['wedding_date'] ?? null;
+                    if ($offset !== null && $wd) $due = max(date('Y-m-d', strtotime($wd . " -$offset day")), date('Y-m-d', strtotime('+3 day')));
+                }
+                q("UPDATE payments SET label = ?, amount = ?, due_date = ?, persen = ?, offset_hari = ? WHERE id = ? AND client_id = ?",
+                  [$label, $amt, $due, $persen, $offset, $pid, $id]);
+                bayarHitungUlang($pid);
+                $ub = [];
+                if ($label !== $pB['label']) $ub[] = 'nama → ' . $label;
+                if (abs($amt - (float) $pB['amount']) >= 0.5) $ub[] = rupiah((float) $pB['amount']) . ' → ' . rupiah($amt);
+                if ($due !== $pB['due_date']) $ub[] = 'tempo ' . ($pB['due_date'] ? tanggalID($pB['due_date']) : '—') . ' → ' . ($due ? tanggalID($due) : '—');
+                if ($ub) clientLog($id, 'bayar', 'Termin diubah: ' . $pB['label'], implode('; ', $ub), (int) $user['id']);
+                flash('Termin disimpan.');
+                redirect($ke);
             }
-            q("UPDATE payments SET paid_at = " . ($p['paid_at'] ? 'NULL' : 'CURDATE()') . " WHERE id = ?", [$pid]);
-            if ($p && !$p['paid_at']) {
-                clientLog((int) $_POST['id'], 'bayar', $p['label'] . ' diterima', rupiah($p['amount']), $user['id']);
-            }
-            redirect('admin/klien.php?id=' . (int) $_POST['id'] . '#uang');
-        }
 
-        elseif ($act === 'pay_del') {
-            q("DELETE FROM payments WHERE id = ? AND client_id = ?", [(int) $_POST['payment_id'], (int) $_POST['id']]);
-            redirect('admin/klien.php?id=' . (int) $_POST['id'] . '#uang');
+            if ($act === 'pay_sesuaikan') {
+                if (!empty($_POST['ke_kontrak'])) {
+                    if (($user['role'] ?? '') !== 'owner') throw new RuntimeException('Mengubah nilai kontrak dari sini hanya untuk owner.');
+                    $tot = (float) (one("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE client_id = ?", [$id])['v'] ?? 0);
+                    q("UPDATE clients SET deal_value = ? WHERE id = ?", [$tot, $id]);
+                    clientLog($id, 'bayar', 'Nilai kontrak disamakan dengan total termin', rupiah($tot), (int) $user['id']);
+                    flash('Nilai kontrak sekarang ' . rupiah($tot) . '.');
+                } else {
+                    $n = terminSesuaikan($id);
+                    flash($n ? "$n termin yang belum lunas disesuaikan ke nilai kontrak." : 'Tidak ada termin yang bisa disesuaikan — tambah termin atau ubah nominal secara manual.', $n ? 'ok' : 'warn');
+                }
+                redirect($ke);
+            }
+
+            if ($act === 'pay_pengingat') {
+                q("UPDATE clients SET pengingat_bayar = 1 - pengingat_bayar WHERE id = ?", [$id]);
+                flash('Pengingat otomatis untuk klien ini ' . ((int) one("SELECT pengingat_bayar v FROM clients WHERE id = ?", [$id])['v'] ? 'aktif.' : 'dimatikan.'));
+                redirect($ke);
+            }
+
+            if ($act === 'pay_del') {
+                if (!$pB) throw new RuntimeException('Termin tidak ditemukan.');
+                if (one("SELECT 1 FROM payment_receipts WHERE payment_id = ? AND status IN ('sah','menunggu') LIMIT 1", [$pid]))
+                    throw new RuntimeException('Termin ini sudah punya pembayaran. Batalkan penerimaannya dulu kalau memang salah catat.');
+                q("DELETE FROM payments WHERE id = ? AND client_id = ?", [$pid, $id]);
+                clientLog($id, 'bayar', 'Termin dihapus: ' . $pB['label'] . ' ' . rupiah((float) $pB['amount']), '', (int) $user['id']);
+                flash('Termin dihapus.');
+                redirect($ke);
+            }
+
+            if ($act === 'pay_generate') {
+                if ((float) $cB['deal_value'] <= 0) throw new RuntimeException('Nilai deal belum diisi. Isi dulu di tab Biodata awal.');
+                $n = terminSusun($id);
+                if ($n) clientLog($id, 'bayar', "Termin disusun dari template ($n termin)", rupiah((float) $cB['deal_value']), $user['id']);
+                flash($n ? "Termin pembayaran disusun dari template ($n termin)." : 'Termin sudah ada.');
+                redirect($ke);
+            }
+            throw new RuntimeException('Aksi pembayaran tidak dikenal.');
         }
 
         elseif ($act === 'delete') {
@@ -693,7 +873,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) { /* tabel lama */ }
             foreach (['client_tasks', 'payments', 'client_activities', 'quotes', 'client_vendor_needs',
                       'client_top_vendors', 'client_segments', 'client_wedding_info', 'client_family',
-                      'client_vendors', 'vendor_messages', 'client_analisa'] as $t) {
+                      'client_vendors', 'vendor_messages', 'client_analisa', 'payment_receipts'] as $t) {
+                if ($t === 'payment_receipts') {
+                    try {
+                        foreach (all("SELECT bukti FROM payment_receipts WHERE client_id = ? AND bukti IS NOT NULL", [$id]) as $bk) {
+                            if ($pb = buktiPath($bk['bukti'])) @unlink($pb);
+                        }
+                    } catch (Throwable $e) {}
+                }
                 try { q("DELETE FROM `$t` WHERE client_id = ?", [$id]); } catch (Throwable $e) { /* tabel belum ada */ }
             }
             q("UPDATE meetings SET client_id = NULL WHERE client_id = ?", [$id]);
@@ -950,28 +1137,34 @@ if ($c):
         <?php endif; ?>
 
       <?php elseif ($stage === 'dp'): ?>
-        <h2>Tagih DP 30%</h2>
-        <?php if ($dpRow): ?>
+        <h2>Tagih <?= $dpRow ? e($dpRow['label']) : 'DP' ?></h2>
+        <?php if ($dpRow): $sisaDp = bayarSisa($dpRow); ?>
           <p class="sub">Klien cocok<?= $c['deal_value'] ? ' dengan nilai <b>' . rupiah((float) $c['deal_value']) . '</b>' : '' ?>.
-            Tagih <b><?= e($dpRow['label']) ?> <?= rupiah((float) $dpRow['amount']) ?></b><?= $dpRow['due_date'] ? ' paling lambat <b>' . e(tanggalID($dpRow['due_date'])) . '</b>' : '' ?>.
-            Begitu DP masuk, klien otomatis diserahkan ke <b>admin office</b> untuk biodata lengkap, dekor, venue, termin, dan meeting.</p>
+            Tagih <b><?= rupiah($sisaDp) ?></b><?= (float) $dpRow['terbayar'] > 0 ? ' (kekurangan — sudah diterima ' . rupiah((float) $dpRow['terbayar']) . ')' : '' ?><?= $dpRow['due_date'] ? ' paling lambat <b>' . e(tanggalID($dpRow['due_date'])) . '</b>' : '' ?>.
+            Begitu DP lunas, klien otomatis diserahkan ke <b>admin office</b> untuk biodata lengkap, dekor, venue, termin, dan meeting.</p>
           <?php if ($bolehJual): ?>
-            <form method="post" class="row c3" style="align-items:end;margin:4px 0 10px">
+            <form method="post" enctype="multipart/form-data" class="dp-form" data-sekali>
               <?= csrfField() ?><input type="hidden" name="act" value="dp_masuk"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
-              <div class="field" style="margin:0"><label>Tanggal DP masuk</label><input type="date" name="tanggal" value="<?= date('Y-m-d') ?>"></div>
-              <div class="field" style="margin:0"><label>Cara bayar</label>
-                <select name="metode"><option>Transfer bank</option><option>Tunai</option><option>QRIS</option><option>Lainnya</option></select></div>
-              <div class="field" style="margin:0"><button class="btn solid" type="submit" style="width:100%"
-                onclick="return confirm('DP sudah benar-benar masuk? Klien akan diserahkan ke admin office.')">Konfirmasi DP masuk</button></div>
+              <div class="row c3" style="align-items:end">
+                <div class="field" style="margin:0"><label>Jumlah diterima</label><input type="text" name="jumlah" data-rp inputmode="numeric" value="<?= (int) round($sisaDp) ?>" required></div>
+                <div class="field" style="margin:0"><label>Tanggal masuk</label><input type="date" name="tanggal" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>"></div>
+                <div class="field" style="margin:0"><label>Cara bayar</label>
+                  <select name="metode"><?php foreach (BAYAR_METODE as $m): ?><option><?= e($m) ?></option><?php endforeach; ?></select></div>
+              </div>
+              <div class="row c2" style="align-items:end;margin-top:10px">
+                <div class="field" style="margin:0"><label>Nama pengirim <span class="muted">(opsional)</span></label><input type="text" name="pengirim" maxlength="120"></div>
+                <div class="field" style="margin:0"><label>Bukti transfer <span class="muted">(opsional)</span></label><input type="file" name="bukti" accept="image/jpeg,image/png,image/webp,application/pdf"></div>
+              </div>
+              <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:12px 0 4px">
+                <button class="btn solid" type="submit"
+                  onclick="return confirm('DP benar-benar sudah masuk ke rekening? Kalau lunas, klien diserahkan ke admin office.')">Konfirmasi DP masuk</button>
+                <?php if ($c['phone']): ?>
+                  <label class="inline"><input type="checkbox" name="kirim_kwitansi" value="1" <?= waSiap() ? 'checked' : '' ?>> Kirim kwitansi ke WA</label>
+                  <label class="inline"><input type="checkbox" name="kirim_portal" value="1" <?= waSiap() ? 'checked' : '' ?>> Kirim tautan dashboard pengantin</label>
+                <?php endif; ?>
+              </div>
             </form>
-            <?php
-              $tagihWA = 'Halo ' . $c['name'] . ', terima kasih sudah memilih ' . setting('site_name', 'Callalily Party') . '.'
-                . "\n\nUntuk mengunci tanggal" . ($c['wedding_date'] ? ' ' . tanggalID($c['wedding_date']) : '')
-                . ', mohon transfer ' . $dpRow['label'] . ' sebesar ' . rupiah((float) $dpRow['amount'])
-                . ($dpRow['due_date'] ? ' paling lambat ' . tanggalID($dpRow['due_date']) : '') . '.'
-                . ($rek ? "\n\n" . implode("\n", $rek) : '')
-                . "\n\nSetelah transfer, mohon kirim bukti transfernya di sini ya. Terima kasih!";
-            ?>
+            <?php $tagihWA = bayarTeksTagihan($c, [$dpRow]); ?>
             <div class="aksi">
               <?php if ($waKlien): ?><a class="btn" target="_blank" rel="noopener" href="https://wa.me/<?= e($waKlien) ?>?text=<?= rawurlencode($tagihWA) ?>">Kirim tagihan DP lewat WhatsApp ↗</a><?php endif; ?>
               <a class="btn ghost" href="#uang">Lihat termin</a>
@@ -980,12 +1173,12 @@ if ($c):
             <?php if (!$rek): ?><p class="hint" style="margin:10px 0 0;color:var(--ember)">Nomor rekening belum diisi di Pengaturan → Price list &amp; pembayaran, jadi teks tagihan belum memuat rekening.</p><?php endif; ?>
           <?php endif; ?>
         <?php else: ?>
-          <p class="sub">Nilai deal belum ada, jadi DP 30% belum bisa dihitung. Isi harga di price list yang disetujui, atau nilai deal di tab Biodata awal.</p>
+          <p class="sub">Nilai deal belum ada, jadi DP belum bisa dihitung. Isi harga di price list yang disetujui, atau nilai deal di tab Biodata awal.</p>
           <?php if ($qAkhir): ?><div class="aksi"><a class="btn solid" href="penawaran.php?id=<?= (int) $qAkhir['id'] ?>">Buka price list</a></div><?php endif; ?>
         <?php endif; ?>
 
       <?php elseif ($stage === 'deal'):
-        $meetOffice = array_filter($meets, fn($m) => !$c['handover_at'] || $m['start_at'] >= $c['handover_at']);
+        $meetOffice = array_filter($meets, fn($m) => $m['status'] !== 'canceled' && (!$c['handover_at'] || $m['start_at'] >= $c['handover_at']));
         $venueAda = !empty($wi['resepsi_lokasi']) || !empty($wi['akad_lokasi']) || !empty($c['venue']); ?>
         <h2>Deal — susun acara bersama klien</h2>
         <p class="sub">DP sudah masuk<?= !empty($c['handover_at']) ? ' ' . e(mb_strtolower(labelHari(substr($c['handover_at'], 0, 10)))) : '' ?><?= $c['deal_value'] ? ' · kontrak ' . rupiah((float) $c['deal_value']) : '' ?>.
@@ -997,6 +1190,7 @@ if ($c):
           <?= $butir((bool) $vAda, $vAda ? count($vAda) . ' vendor dipilih' : 'Pilih vendor', '#vendor') ?>
           <?= $butir(count($pays) > 1, $pays ? count($pays) . ' termin pembayaran tersusun' : 'Susun termin pembayaran', '#uang') ?>
           <?= $butir((bool) $meetOffice, $meetOffice ? count($meetOffice) . ' meeting tercatat' : 'Jadwalkan meeting pertama', 'jadwal.php?new=1&client=' . (int) $c['id']) ?>
+          <?= $butir(!empty($c['portal_seen_at']), !empty($c['portal_seen_at']) ? 'Dashboard pengantin sudah dibuka klien' : 'Kirim dashboard pengantin ke klien', '#portal') ?>
         </ul>
         <div class="aksi">
           <?= $formTahap('persiapan', 'Mulai persiapan →', 'solid', 'Mulai persiapan? Checklist H-90 sampai H+3 dibuat otomatis.') ?>
@@ -1066,6 +1260,50 @@ if ($c):
     </nav>
 
     <section class="tabpane" data-pane="ikhtisar" id="tab-ikhtisar">
+    <?php if ($sudahDeal && $stage !== 'batal'):
+      $ptok = (string) ($c['portal_token'] ?? '');
+      $purl = $ptok !== '' ? portalUrl($ptok) : '';
+      $waUrlP = $_SESSION['wa_url_portal'] ?? ''; unset($_SESSION['wa_url_portal']); ?>
+    <!-- ---------- Dashboard pengantin ---------- -->
+    <div class="card" id="portal">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap">
+        <h2 style="margin:0">Dashboard pengantin</h2>
+        <span class="pill <?= $purl ? ($c['portal_seen_at'] ? 'live' : 'warn') : 'draft' ?>"><?=
+          $purl ? ($c['portal_seen_at'] ? 'Dibuka ' . e(mb_strtolower(labelHari(substr($c['portal_seen_at'], 0, 10)))) : 'Belum dibuka klien') : 'Belum dibuat' ?></span>
+      </div>
+      <p class="sub">Halaman pribadi klien: hitung mundur, pembayaran &amp; kwitansi, jadwal meeting, vendor, dan formulir data keluarga.
+        <?= setting('portal_aktif', '1') === '0' ? '<b style="color:var(--rose)">Semua dashboard sedang dimatikan di Pengaturan.</b>' : '' ?></p>
+      <?php if (!empty($c['portal_isi_at'])): ?>
+        <p class="flash warn" style="margin:8px 0"><span>Ada isian baru dari klien <?= e(mb_strtolower(labelHari(substr($c['portal_isi_at'], 0, 10)))) ?> —
+          <a href="#datalengkap" style="color:inherit;text-decoration:underline">periksa Biodata lengkap</a>.</span></p>
+      <?php endif; ?>
+      <?php if ($waUrlP): ?><p style="margin:8px 0"><a class="btn sm solid" href="<?= e($waUrlP) ?>" target="_blank" rel="noopener">Buka WhatsApp ↗</a></p><?php endif; ?>
+      <?php if ($purl): ?>
+        <div class="salin-baris"><input type="text" readonly value="<?= e($purl) ?>" onclick="this.select()" aria-label="Tautan dashboard pengantin">
+          <button class="btn sm" type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.value).then(()=>{this.textContent='Tersalin ✓'})">Salin</button></div>
+      <?php endif; ?>
+      <div class="aksi" style="margin-top:10px">
+        <?php if ($c['phone']): ?>
+          <form method="post" style="display:inline"><?= csrfField() ?><input type="hidden" name="act" value="portal_kirim"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
+            <button class="btn sm solid" type="submit"><?= $purl ? 'Kirim ulang ke WhatsApp' : 'Kirim ke WhatsApp klien' ?></button></form>
+        <?php endif; ?>
+        <?php if (!$purl): ?>
+          <form method="post" style="display:inline"><?= csrfField() ?><input type="hidden" name="act" value="portal_buat"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
+            <button class="btn sm" type="submit">Buat tautan</button></form>
+        <?php else: ?>
+          <a class="btn sm ghost" href="<?= e($purl) ?>" target="_blank" rel="noopener">Lihat sebagai klien ↗</a>
+          <?php if (in_array($peranSaya, ['owner', 'admin_office'], true)): ?>
+            <form method="post" style="display:inline" onsubmit="return confirm('Buat tautan baru? Tautan lama langsung tidak bisa dibuka.')"><?= csrfField() ?>
+              <input type="hidden" name="act" value="portal_putar"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
+              <button class="btn sm ghost" type="submit">Ganti tautan</button></form>
+            <form method="post" style="display:inline" onsubmit="return confirm('Matikan dashboard klien ini?')"><?= csrfField() ?>
+              <input type="hidden" name="act" value="portal_matikan"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
+              <button class="btn sm ghost danger" type="submit">Matikan</button></form>
+          <?php endif; ?>
+        <?php endif; ?>
+      </div>
+    </div>
+    <?php endif; ?>
     <!-- ---------- Tindakan berikutnya ---------- -->
     <?php if ($c['stage'] !== 'selesai' && $c['stage'] !== 'batal'):
       $telat = $c['next_action_at'] && strtotime($c['next_action_at']) < strtotime(date('Y-m-d')); ?>
@@ -1178,9 +1416,19 @@ if ($c):
           <div style="margin-top:5px;font-size:14px"><?= !empty($wi['resepsi_tanggal']) ? e(tanggalID($wi['resepsi_tanggal'])) . (!empty($wi['resepsi_jam']) ? ' · ' . substr($wi['resepsi_jam'], 0, 5) : '') : ($c['wedding_date'] ? e(tanggalID($c['wedding_date'])) : '<span class="muted">Tanggal belum ada</span>') ?><br>
             <?= !empty($wi['resepsi_lokasi']) ? e($wi['resepsi_lokasi']) : ($c['venue'] ? e($c['venue']) : '<span class="muted">Venue belum dipilih</span>') ?></div></div>
       </div>
+      <?php if (trim((string) ($wi['dekor_klien'] ?? '')) !== ''): ?>
+        <div class="dekor-klien">
+          <span class="lab">Referensi dari pengantin (dashboard)</span>
+          <p style="margin:6px 0 0;white-space:pre-wrap"><?php
+            // Tautan di teks klien dijadikan link aman; sisanya di-escape.
+            foreach (preg_split('#(https?://[^\s<>"]+)#', (string) $wi['dekor_klien'], -1, PREG_SPLIT_DELIM_CAPTURE) as $i => $bag) {
+                echo $i % 2 ? '<a href="' . e($bag) . '" target="_blank" rel="noopener noreferrer nofollow">' . e($bag) . '</a>' : e($bag);
+            } ?></p>
+        </div>
+      <?php endif; ?>
       <form method="post">
         <?= csrfField() ?><input type="hidden" name="act" value="dekor"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
-        <div class="field"><label for="kd">Konsep &amp; susunan dekor</label>
+        <div class="field"><label for="kd">Konsep &amp; susunan dekor <span class="muted">(internal — tidak tampil ke klien)</span></label>
           <textarea id="kd" name="konsep_dekor" rows="7" placeholder="Tema &amp; palet warna&#10;Pelaminan / backdrop&#10;Bunga (segar / artifisial), meja tamu, area foto&#10;Jalur masuk, pencahayaan&#10;Referensi (tautan Pinterest / Instagram)"><?= e($wi['konsep_dekor'] ?? '') ?></textarea>
           <p class="hint" style="margin:6px 0 0">Ditulis sesuai hasil meeting dengan klien — ini yang dibawa ke vendor dekorasi.</p></div>
         <button class="btn solid" type="submit">Simpan konsep dekor</button>
@@ -1490,6 +1738,19 @@ if ($c):
         <input type="hidden" name="act" value="datalengkap">
         <input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
         <input type="hidden" name="data_lengkap" value="1">
+        <input type="hidden" name="portal_v" value="<?= e(portalVersi((int) $c['id'], 'keluarga') . '|' . portalVersi((int) $c['id'], 'prosesi')) ?>">
+        <?php if (!empty($c['portal_isi_at'])): ?>
+          <p class="flash warn" style="margin:0 0 12px"><span>Ada isian baru dari klien lewat dashboard pengantin <?= e(mb_strtolower(labelHari(substr($c['portal_isi_at'], 0, 10)))) ?>.
+            Perubahannya tercatat di Riwayat. Menyimpan formulir ini menandainya sudah diperiksa.</span></p>
+        <?php endif; ?>
+        <?php if (stageSudahDeal($c['stage'])): ?><p class="hint" style="margin:0 0 12px">Data keluarga dan prosesi terlihat &amp; bisa diubah klien di dashboard pengantin
+          sampai H-<?= (int) setting('portal_kunci_hari', '30') ?>. Jangan tulis catatan internal di sini.</p><?php endif; ?>
+        <div class="row c2">
+          <div class="field"><label>Nama lengkap mempelai pria (dengan gelar)</label>
+            <input type="text" name="pria_nama" maxlength="190" value="<?= e($wi['pria_nama'] ?? '') ?>" placeholder="Untuk undangan & naskah MC"></div>
+          <div class="field"><label>Nama lengkap mempelai wanita (dengan gelar)</label>
+            <input type="text" name="wanita_nama" maxlength="190" value="<?= e($wi['wanita_nama'] ?? '') ?>"></div>
+        </div>
 
         <span class="lab" style="display:block;margin:4px 0 9px">Mempelai</span>
         <div class="row c2">
@@ -1739,71 +2000,8 @@ if ($c):
     </section>
 
     <section class="tabpane" data-pane="uang" id="tab-uang">
-    <!-- ---------- Pembayaran ---------- -->
-    <div class="card" id="uang">
-      <h2>Pembayaran</h2>
-      <?php if ($pays): ?>
-        <div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:6px">
-          <div><span class="lab">Nilai kontrak</span><div class="money" style="font-size:16px;margin-top:4px"><?= rupiah($money['total']) ?></div></div>
-          <div><span class="lab">Diterima</span><div class="money" style="font-size:16px;margin-top:4px;color:var(--sage)"><?= rupiah($money['lunas']) ?></div></div>
-          <div><span class="lab">Sisa</span><div class="money" style="font-size:16px;margin-top:4px;color:var(--ember)"><?= rupiah($money['sisa']) ?></div></div>
-        </div>
-        <div class="bar-progress"><i style="width:<?= $money['persen'] ?>%"></i></div>
-        <p class="hint"><?= $money['persen'] ?>% terbayar</p>
-
-        <table class="tbl" style="margin-top:16px">
-          <thead><tr><th>Termin</th><th>Nominal</th><th>Jatuh tempo</th><th>Status</th><th></th></tr></thead>
-          <tbody>
-          <?php foreach ($pays as $p):
-            $telat = !$p['paid_at'] && $p['due_date'] && strtotime($p['due_date']) < time(); ?>
-            <tr>
-              <td data-l="Termin"><b><?= e($p['label']) ?></b><?php if ($p['method']): ?><br><span class="muted mono"><?= e($p['method']) ?></span><?php endif; ?></td>
-              <td class="money" data-l="Nominal"><?= rupiah($p['amount']) ?></td>
-              <td class="num" data-l="Jatuh tempo"><?= $p['due_date'] ? tanggalID($p['due_date']) : '—' ?></td>
-              <td data-l="Status">
-                <?php if ($p['paid_at']): ?><span class="pill live dot">Lunas <?= date('d/m', strtotime($p['paid_at'])) ?></span>
-                <?php elseif ($telat): ?><span class="pill bad">Terlambat</span>
-                <?php else: ?><span class="pill draft">Belum</span><?php endif; ?>
-              </td>
-              <td class="actions">
-                <form method="post" style="display:inline"><?= csrfField() ?>
-                  <input type="hidden" name="act" value="pay_paid"><input type="hidden" name="id" value="<?= $c['id'] ?>">
-                  <input type="hidden" name="payment_id" value="<?= $p['id'] ?>">
-                  <button class="btn sm <?= $p['paid_at'] ? 'ghost' : 'solid' ?>" type="submit"><?= $p['paid_at'] ? 'Batal lunas' : 'Tandai lunas' ?></button></form>
-                <form method="post" style="display:inline" onsubmit="return confirm('Hapus termin ini?')"><?= csrfField() ?>
-                  <input type="hidden" name="act" value="pay_del"><input type="hidden" name="id" value="<?= $c['id'] ?>">
-                  <input type="hidden" name="payment_id" value="<?= $p['id'] ?>">
-                  <button class="btn sm danger" type="submit">Hapus</button></form>
-              </td>
-            </tr>
-          <?php endforeach; ?>
-          </tbody>
-        </table>
-      <?php else: ?>
-        <p class="sub">Belum ada termin. Termin disusun otomatis dari <b>template pembayaran</b> — sama dengan yang
-          tercantum di penawaran — begitu klien deal dan nilai kontraknya ada.</p>
-        <?php if ((float) $c['deal_value'] > 0): ?>
-          <form method="post" style="margin-bottom:6px"><?= csrfField() ?>
-            <input type="hidden" name="act" value="pay_generate"><input type="hidden" name="id" value="<?= $c['id'] ?>">
-            <button class="btn solid sm" type="submit">Susun termin dari template (<?= rupiah((float) $c['deal_value'], true) ?>)</button>
-          </form>
-        <?php elseif ($sudahDeal): ?>
-          <p class="hint">Nilai deal belum diisi. Isi di tab <a href="#data" style="color:var(--ember)">Data klien</a>, lalu susun terminnya di sini.</p>
-        <?php endif; ?>
-      <?php endif; ?>
-
-      <details style="margin-top:16px">
-        <summary style="cursor:pointer;color:var(--ember);font-size:13.5px;padding:6px 0">+ Tambah termin</summary>
-        <form method="post" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:11px">
-          <?= csrfField() ?><input type="hidden" name="act" value="pay_save"><input type="hidden" name="id" value="<?= $c['id'] ?>">
-          <div class="field" style="margin:0;min-width:140px"><label>Nama termin</label><input type="text" name="label" required placeholder="DP 30%"></div>
-          <div class="field" style="margin:0;min-width:150px"><label>Nominal</label><input type="text" name="amount" data-rp inputmode="numeric" placeholder="15000000"></div>
-          <div class="field" style="margin:0;min-width:150px"><label>Jatuh tempo</label><input type="date" name="due_date"></div>
-          <div class="field" style="margin:0;min-width:130px"><label>Metode</label><input type="text" name="method" placeholder="Transfer BCA"></div>
-          <button class="btn" type="submit">Tambah</button>
-        </form>
-      </details>
-    </div>
+    <!-- ---------- Pembayaran (admin/_klien-bayar.php) ---------- -->
+    <?php require __DIR__ . '/_klien-bayar.php'; ?>
     <!-- ---------- Checklist ---------- -->
     <?php if ($tasks): ?>
     <div class="card" id="checklist">

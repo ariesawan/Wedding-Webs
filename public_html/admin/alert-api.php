@@ -40,7 +40,7 @@ try {
                                  WHERE client_id = ? AND done_at IS NULL", [$r['id']])['c'] ?? 0);
 
         $belumBayar = (int) (one("SELECT COUNT(*) c FROM payments
-                                  WHERE client_id = ? AND paid_at IS NULL
+                                  WHERE client_id = ? AND paid_at IS NULL AND amount > terbayar
                                     AND due_date <= CURDATE()", [$r['id']])['c'] ?? 0);
 
         $badan = [];

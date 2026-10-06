@@ -226,7 +226,8 @@ function terminKlien(float $total, ?string $weddingDate): array
     // boleh jatuh tempo sebelum itu: kalau acaranya tinggal sebulan, termin
     // H-60 langsung tercatat "terlambat" begitu deal, padahal klien baru
     // saja setuju.
-    $paling_awal = date('Y-m-d', strtotime('+3 day'));
+    $tenggatDp = max(1, (int) setting('dp_tenggat_hari', '3'));
+    $paling_awal = date('Y-m-d', strtotime("+$tenggatDp day"));
 
     if (!$tpl) {
         $out = [];
@@ -258,13 +259,14 @@ function terminKlien(float $total, ?string $weddingDate): array
         }
 
         $out[] = [
-            'kode'       => (string) $t['kode'],
-            'label'      => $t['label'],
-            'persen'     => (float) $t['persen'],
-            'amount'     => $amount,
-            'due_date'   => $due,
-            'wajib'      => (int) $t['wajib'],
-            'sort_order' => ($i + 1) * 10,
+            'kode'        => (string) $t['kode'],
+            'label'       => $t['label'],
+            'persen'      => (float) $t['persen'],
+            'amount'      => $amount,
+            'due_date'    => $due,
+            'offset_hari' => $t['offset_hari'] === null ? null : (int) $t['offset_hari'],
+            'wajib'       => (int) $t['wajib'],
+            'sort_order'  => ($i + 1) * 10,
         ];
     }
     return $out;
@@ -279,9 +281,9 @@ function terminSusun(int $clientId): int
 
     $n = 0;
     foreach (terminKlien((float) $c['deal_value'], $c['wedding_date']) as $t) {
-        q("INSERT INTO payments (client_id, kode, label, amount, due_date, sort_order, persen, wajib)
-           VALUES (?,?,?,?,?,?,?,?)",
-          [$clientId, $t['kode'], $t['label'], $t['amount'], $t['due_date'],
+        q("INSERT INTO payments (client_id, kode, label, amount, due_date, offset_hari, sort_order, persen, wajib)
+           VALUES (?,?,?,?,?,?,?,?,?)",
+          [$clientId, $t['kode'], $t['label'], $t['amount'], $t['due_date'], $t['offset_hari'] ?? null,
            $t['sort_order'], $t['persen'], $t['wajib']]);
         $n++;
     }
@@ -316,15 +318,20 @@ function terminDp(int $clientId): ?array
 /**
  * DP diterima → klien deal dan diserahkan ke admin office.
  *
- * Satu-satunya pintu serah terima di alur baru: owner menetapkan admin early
- * memegang klien SAMPAI DP 30% masuk. Dipanggil dari tombol "DP sudah masuk"
- * dan dari "Tandai lunas" pada termin DP.
+ * Satu-satunya pintu serah terima: uangnya dicatat lewat bayarCatat() (jadi
+ * DP bisa dibayar sebagian dan punya kwitansi), dan klien baru berpindah ke
+ * admin office kalau DP-nya LUNAS PENUH. DP sebagian: klien tetap Menunggu DP
+ * dengan tindakan "tagih kekurangan DP".
+ *
+ * $opt: jumlah (bawaan sisa DP), pengirim, bukti, catatan
  */
-function dpDiterima(int $clientId, ?int $userId = null, string $tanggal = '', string $metode = ''): array
+function dpDiterima(int $clientId, ?int $userId = null, string $tanggal = '', string $metode = '', array $opt = []): array
 {
+    require_once __DIR__ . '/bayar.php';
     $c = one("SELECT stage FROM clients WHERE id = ?", [$clientId]);
     if (!$c) throw new RuntimeException('Klien tidak ditemukan.');
     $tanggal = $tanggal && strtotime($tanggal) ? date('Y-m-d', strtotime($tanggal)) : date('Y-m-d');
+    if ($tanggal > date('Y-m-d')) $tanggal = date('Y-m-d');
 
     $dp = terminDp($clientId);
     if (!$dp) {
@@ -333,45 +340,116 @@ function dpDiterima(int $clientId, ?int $userId = null, string $tanggal = '', st
         }
         $dp = terminDp($clientId);
     }
-    if (!$dp['paid_at']) {
-        q("UPDATE payments SET paid_at = ?, method = IF(? <> '', ?, method) WHERE id = ?",
-          [$tanggal, $metode, $metode, $dp['id']]);
-        clientLog($clientId, 'bayar', $dp['label'] . ' diterima', rupiah((float) $dp['amount'])
-                  . ($metode ? ' · ' . $metode : ''), $userId);
+    $catat = null;
+    if (!$dp['paid_at'] && bayarSisa($dp) > 0) {
+        $jumlah = isset($opt['jumlah']) && (float) $opt['jumlah'] > 0 ? (float) $opt['jumlah'] : bayarSisa($dp);
+        $catat = bayarCatat($clientId, $jumlah, $tanggal, $metode ?: 'Transfer bank', [
+            'payment_id' => (int) $dp['id'], 'user_id' => $userId,
+            'pengirim' => $opt['pengirim'] ?? '', 'bukti' => $opt['bukti'] ?? null, 'catatan' => $opt['catatan'] ?? '',
+        ]);
+        $dp = terminDp($clientId);
     }
 
     $info = [];
-    if (!stageSudahDeal($c['stage'])) {
+    $lunas = (bool) $dp['paid_at'];
+    if ($lunas && !stageSudahDeal($c['stage'])) {
         $r = clientSetStage($clientId, 'deal', $userId, $dp['label'] . ' diterima ' . tanggalID($tanggal) . '.');
         $info = $r['info'];
+    } elseif (!$lunas) {
+        $kurang = bayarSisa($dp);
+        q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
+          ['Tagih kekurangan ' . $dp['label'] . ' · ' . rupiah($kurang),
+           $dp['due_date'] && $dp['due_date'] > date('Y-m-d') ? $dp['due_date'] : date('Y-m-d', strtotime('+2 day')), $clientId]);
+        $info[] = 'DP baru diterima sebagian — kurang ' . rupiah($kurang) . '. Klien tetap di Menunggu DP sampai lunas.';
     }
-    return ['dp' => $dp, 'info' => $info];
+    return ['dp' => $dp, 'info' => $info, 'lunas' => $lunas, 'kwitansi' => $catat];
 }
 
 /**
- * Nilai kontrak berubah setelah termin tersusun (tambahan paket, potongan):
- * sisa nilai dibagi ulang ke termin yang BELUM dibayar menurut perbandingan
- * persennya. Termin yang sudah lunas tidak disentuh.
+ * Nilai kontrak berubah setelah termin tersusun (tambahan paket, potongan,
+ * nilai deal diubah): bagi ulang selisihnya ke termin yang BELUM lunas.
+ *
+ *   - termin lunas dan termin bernominal tetap (persen kosong — dibuat atau
+ *     diubah tangan) tidak disentuh;
+ *   - sisanya dibagi ke termin berpersen yang belum lunas sesuai persennya,
+ *     tidak pernah di bawah yang sudah dibayar;
+ *   - kalau tidak ada yang bisa disesuaikan dan nilainya naik, ditambah satu
+ *     baris "Tambahan kontrak".
+ *
+ * Dulu baris manual diberi bobot 1 dan selalu paling bawah, sehingga baris
+ * itu menerima "sisa − terpakai" = Rp 0 setiap kali ada tambahan disetujui.
+ *
+ * @return int jumlah termin yang berubah
  */
 function terminSesuaikan(int $clientId): int
 {
-    $c = one("SELECT deal_value FROM clients WHERE id = ?", [$clientId]);
-    $total = (float) ($c['deal_value'] ?? 0);
-    if ($total <= 0) return 0;
-    $lunas = (float) (one("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE client_id = ? AND paid_at IS NOT NULL",
-                          [$clientId])['v'] ?? 0);
-    $belum = all("SELECT id, persen FROM payments WHERE client_id = ? AND paid_at IS NULL ORDER BY sort_order, id", [$clientId]);
-    if (!$belum) return 0;
-    $sisa  = max(0, $total - $lunas);
-    $bobot = array_sum(array_map(fn($p) => (float) ($p['persen'] ?: 0), $belum)) ?: count($belum);
-    $terpakai = 0.0;
-    foreach ($belum as $i => $p) {
-        $w = (float) ($p['persen'] ?: 0) ?: 1;
-        $amt = $i === count($belum) - 1 ? $sisa - $terpakai : round($sisa * $w / $bobot);
-        $terpakai += $amt;
-        q("UPDATE payments SET amount = ? WHERE id = ?", [$amt, $p['id']]);
+    $c = one("SELECT deal_value, wedding_date FROM clients WHERE id = ?", [$clientId]);
+    $target = round((float) ($c['deal_value'] ?? 0), 2);
+    if ($target <= 0) return 0;
+    $rows = all("SELECT * FROM payments WHERE client_id = ? ORDER BY sort_order, id", [$clientId]);
+    if (!$rows) return 0;
+
+    $tetap = 0.0; $ubah = [];
+    foreach ($rows as $p) {
+        if ($p['paid_at'] || $p['persen'] === null || (float) $p['persen'] <= 0) $tetap += (float) $p['amount'];
+        else $ubah[] = $p;
     }
-    return count($belum);
+    $sisa = round($target - $tetap, 2);
+    $berubah = 0;
+
+    if (!$ubah) {
+        if ($sisa > 0.5) {
+            $hariH = $c['wedding_date'] ?: null;
+            $due = date('Y-m-d', strtotime('+7 day'));
+            if ($hariH && date('Y-m-d', strtotime($hariH . ' -7 day')) < $due) $due = date('Y-m-d', strtotime($hariH . ' -7 day'));
+            if ($due < date('Y-m-d', strtotime('+3 day'))) $due = date('Y-m-d', strtotime('+3 day'));
+            $max = (int) (one("SELECT COALESCE(MAX(sort_order),0) m FROM payments WHERE client_id = ?", [$clientId])['m'] ?? 0);
+            q("INSERT INTO payments (client_id, kode, label, amount, due_date, sort_order, persen, wajib)
+               VALUES (?, 'tambahan', 'Tambahan kontrak', ?, ?, ?, NULL, 0)", [$clientId, $sisa, $due, $max + 10]);
+            clientLog($clientId, 'bayar', 'Termin ditambah: Tambahan kontrak ' . rupiah($sisa), '', null);
+            return 1;
+        }
+        return 0;
+    }
+
+    require_once __DIR__ . '/bayar.php';
+    $baru = []; $terpakai = 0.0; $n = count($ubah);
+    // Termin yang jatahnya di bawah yang sudah dibayar dijepit di angka itu,
+    // lalu sisanya dibagi ulang ke termin lain — diulang sampai stabil.
+    $bebas = $ubah; $sisaBagi = $sisa;
+    for ($putaran = 0; $putaran < $n && $bebas; $putaran++) {
+        $bobotBebas = array_sum(array_map(fn($p) => (float) $p['persen'], $bebas)) ?: 1;
+        $dijepit = [];
+        foreach ($bebas as $k => $p) {
+            if (round($sisaBagi * (float) $p['persen'] / $bobotBebas) < (float) $p['terbayar']) $dijepit[] = $k;
+        }
+        if (!$dijepit) break;
+        foreach ($dijepit as $k) {
+            $baru[$bebas[$k]['id']] = (float) $bebas[$k]['terbayar'];
+            $sisaBagi -= (float) $bebas[$k]['terbayar'];
+            unset($bebas[$k]);
+        }
+    }
+    $bebas = array_values($bebas);
+    $bobotBebas = array_sum(array_map(fn($p) => (float) $p['persen'], $bebas)) ?: 1;
+    foreach ($bebas as $i => $p) {
+        $baru[$p['id']] = $i === count($bebas) - 1
+            ? round($sisaBagi - $terpakai, 2)
+            : round($sisaBagi * (float) $p['persen'] / $bobotBebas);
+        $terpakai += $baru[$p['id']];
+    }
+    $catatan = [];
+    foreach ($ubah as $p) {
+        $nilai = max((float) $p['terbayar'], (float) ($baru[$p['id']] ?? $p['amount']));
+        if (abs($nilai - (float) $p['amount']) >= 0.5) {
+            q("UPDATE payments SET amount = ? WHERE id = ?", [$nilai, $p['id']]);
+            bayarHitungUlang((int) $p['id']);
+            $catatan[] = $p['label'] . ': ' . rupiah((float) $p['amount']) . ' → ' . rupiah($nilai);
+            $berubah++;
+        }
+    }
+    if ($catatan) clientLog($clientId, 'bayar', 'Termin disesuaikan ke nilai kontrak ' . rupiah($target), implode('; ', $catatan), null);
+    return $berubah;
 }
 
 /** Catat aktivitas ke garis waktu klien. */
@@ -500,6 +578,13 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
     if ($stage === 'batal') {
         q("UPDATE clients SET lost_at = NOW(), lost_reason = ?, stage_batal = ? WHERE id = ?",
           [mb_substr($note, 0, 255), momenGugur($c['stage']), $id]);
+        // Dashboard pengantin ikut mati. Diaktifkan lagi = butuh tautan baru.
+        try {
+            if (!empty($c['portal_token'])) {
+                q("UPDATE clients SET portal_token = NULL WHERE id = ?", [$id]);
+                $info[] = 'Tautan dashboard pengantin dimatikan.';
+            }
+        } catch (Throwable $e) { /* kolom belum ada */ }
         // Alasan bebas yang diketik di sini berguna untuk dibaca, tapi tidak
         // bisa dihitung. Analisa terstruktur diminta terpisah — dan diminta
         // SEKARANG, karena ingatan soal kenapa klien mundur luruh cepat.
@@ -530,26 +615,28 @@ function eventPastikan(int $clientId): bool
 }
 
 /**
- * Tanggal pernikahan bergeser → jatuh tempo termin yang belum dibayar ikut
- * digeser, dengan aturan yang sama seperti saat termin disusun (hari-H
- * dikurangi offset template, paling cepat 3 hari lagi). Termin DP dan termin
- * yang diketik manual (tanpa offset) tidak disentuh.
+ * Tanggal pernikahan bergeser → jatuh tempo termin yang belum lunas ikut
+ * digeser dengan aturan yang dibekukan per klien (payments.offset_hari:
+ * hari-H dikurangi n hari, paling cepat 3 hari lagi). Termin DP, termin
+ * manual, dan tanggal yang diubah tangan (offset kosong) tidak disentuh.
+ *
+ * @return int jumlah termin yang bergeser
  */
 function terminGeser(int $clientId, string $weddingDate): int
 {
-    try {
-        $rows = all("SELECT p.id, t.offset_hari FROM payments p
-                       JOIN payment_templates t ON t.kode = p.kode AND p.kode <> ''
-                      WHERE p.client_id = ? AND p.paid_at IS NULL AND t.offset_hari IS NOT NULL", [$clientId]);
-    } catch (Throwable $e) {
-        return 0;
-    }
+    $rows = all("SELECT id, label, due_date, offset_hari FROM payments
+                 WHERE client_id = ? AND paid_at IS NULL AND offset_hari IS NOT NULL", [$clientId]);
     $paling_awal = date('Y-m-d', strtotime('+3 day'));
+    $n = 0; $catatan = [];
     foreach ($rows as $r) {
-        $due = date('Y-m-d', strtotime($weddingDate . ' -' . (int) $r['offset_hari'] . ' day'));
-        q("UPDATE payments SET due_date = ? WHERE id = ?", [max($due, $paling_awal), $r['id']]);
+        $due = max(date('Y-m-d', strtotime($weddingDate . ' -' . (int) $r['offset_hari'] . ' day')), $paling_awal);
+        if ($due === $r['due_date']) continue;
+        q("UPDATE payments SET due_date = ? WHERE id = ?", [$due, $r['id']]);
+        $catatan[] = $r['label'] . ': ' . ($r['due_date'] ? tanggalID($r['due_date']) : '—') . ' → ' . tanggalID($due);
+        $n++;
     }
-    return count($rows);
+    if ($catatan) clientLog($clientId, 'bayar', 'Jatuh tempo termin digeser mengikuti hari-H', implode('; ', $catatan), null);
+    return $n;
 }
 
 /** Perbarui tanggal jatuh tempo checklist bila tanggal pernikahan bergeser. */
@@ -566,16 +653,15 @@ function retimeTasks(int $clientId, string $weddingDate): int
 /** Ringkasan uang satu klien. */
 function clientMoney(int $clientId): array
 {
-    $r = one("SELECT COALESCE(SUM(amount),0) total,
-                     COALESCE(SUM(CASE WHEN paid_at IS NOT NULL THEN amount ELSE 0 END),0) lunas
+    $r = one("SELECT COALESCE(SUM(amount),0) total, COALESCE(SUM(terbayar),0) lunas
               FROM payments WHERE client_id = ?", [$clientId]);
     $total = (float) ($r['total'] ?? 0);
     $lunas = (float) ($r['lunas'] ?? 0);
     return [
         'total'   => $total,
         'lunas'   => $lunas,
-        'sisa'    => $total - $lunas,
-        'persen'  => $total > 0 ? (int) round($lunas / $total * 100) : 0,
+        'sisa'    => max(0, $total - $lunas),
+        'persen'  => $total > 0 ? (int) min(100, round($lunas / $total * 100)) : 0,
     ];
 }
 

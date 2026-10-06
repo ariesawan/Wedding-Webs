@@ -977,3 +977,50 @@ label.inline{display:inline-flex;gap:7px;align-items:center;font-size:13.5px;mar
 
 /* ---------- pilihan paket di formulir klien baru ---------- */
 .paket-pilih{display:grid;gap:9px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+
+/* ---------- Pembayaran (tab klien) ---------- */
+.bayar-kepala{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.bayar-angka{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:10px}
+.bayar-angka b{display:block;font-size:17px;margin-top:3px;font-weight:600}
+@media(max-width:520px){.bayar-angka b{font-size:15px}}
+.bayar-catat{margin:14px 0 4px;border:1px solid var(--ember-line);border-radius:12px;background:var(--ember-soft)}
+.bayar-catat summary{cursor:pointer;padding:11px 14px;font-weight:600;color:var(--ember);list-style:none}
+.bayar-catat summary::-webkit-details-marker{display:none}
+.bayar-catat summary::before{content:"+ "}
+.bayar-catat[open] summary::before{content:"− "}
+.bayar-form{padding:0 14px 14px}
+.bayar-tbl td{vertical-align:top}
+.bayar-ubah{display:inline-block;position:relative}
+.bayar-ubah summary{list-style:none;display:inline-flex}
+.bayar-ubah summary::-webkit-details-marker{display:none}
+.bayar-ubah[open] .bayar-ubah-f{display:block}
+.bayar-ubah-f{position:absolute;right:0;z-index:20;min-width:260px;margin-top:6px;padding:12px;border-radius:12px;
+  background:var(--ink-2);border:var(--card-border);box-shadow:var(--shadow-lift);text-align:left}
+.bayar-ubah-f .field{margin-bottom:10px}
+.bayar-terima li{align-items:flex-start}
+.bayar-terima .isi{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.bayar-terima .isi b{font-size:15px}
+.bayar-terima .isi span{font-size:12.5px;color:var(--ivory-60)}
+.bayar-terima li.batal .isi b{text-decoration:line-through;color:var(--ivory-38)}
+.bayar-terima .aksi-kecil{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+@media(max-width:620px){.bayar-terima li{flex-direction:column}.bayar-terima .aksi-kecil{justify-content:flex-start}
+  .bayar-ubah-f{position:static;min-width:0}}
+
+/* ---------- Dashboard pengantin (kartu klien) ---------- */
+.salin-baris{display:flex;gap:8px;margin-top:10px}
+.salin-baris input{flex:1;min-width:0;font-family:var(--mono);font-size:12px}
+.dekor-klien{border:1px dashed var(--ember-line);border-radius:12px;padding:12px 14px;margin:0 0 14px;background:var(--ember-soft)}
+.dekor-klien a{color:var(--ember);word-break:break-all}
+.bayar-termin{list-style:none;margin:14px 0 0;padding:0}
+.bayar-termin li{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,.8fr) auto;gap:8px 14px;align-items:start;
+  padding:12px 0;border-bottom:1px solid var(--ivory-07)}
+.bayar-termin li:last-child{border-bottom:0}
+.bayar-termin .kiri{display:flex;flex-direction:column;gap:2px;min-width:0}
+.bayar-termin .kiri b{font-size:14px}
+.bayar-termin .kiri span{font-size:12.3px;color:var(--ivory-60)}
+.bayar-termin .nominal{display:flex;flex-direction:column;gap:2px;text-align:right;font-variant-numeric:tabular-nums}
+.bayar-termin .nominal b{font-size:14px;font-weight:600;white-space:nowrap}
+.bayar-termin .nominal span{font-size:12px;color:var(--sage-text)}
+.bayar-termin .kanan{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center;max-width:330px}
+.bayar-termin .kanan form{display:inline}
+@media(max-width:700px){.bayar-termin li{grid-template-columns:minmax(0,1fr) auto}.bayar-termin .kanan{grid-column:1/-1;justify-content:flex-start;max-width:none}}
