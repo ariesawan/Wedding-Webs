@@ -20,9 +20,6 @@ function kwitansiPdf(int $receiptId): string
         throw new RuntimeException('Kwitansi tidak ditemukan.');
     }
     $c = one("SELECT id, name, partner_name, wedding_date FROM clients WHERE id = ?", [$r['client_id']]);
-    $wi = [];
-    try { $wi = one("SELECT pria_nama, wanita_nama FROM client_wedding_info WHERE client_id = ?", [$r['client_id']]) ?: []; }
-    catch (Throwable $e) { $wi = []; }
     $grup = all("SELECT r.jumlah, r.status, p.label, p.amount, p.terbayar, p.paid_at
                  FROM payment_receipts r JOIN payments p ON p.id = r.payment_id
                  WHERE r.client_id = ? AND r.kwitansi_no = ? AND r.status = ?
@@ -37,9 +34,10 @@ function kwitansiPdf(int $receiptId): string
     $kota    = setting('kwitansi_kota', '') ?: (setting('address_city', '') ?: 'Yogyakarta');
     $ttd     = setting('kwitansi_penandatangan', '') ?: $brand;
     $wa      = waTampil(waNomorPic('deal'));
-    $namaKlien = trim(($wi['pria_nama'] ?? '') !== '' || ($wi['wanita_nama'] ?? '') !== ''
-        ? trim(($wi['pria_nama'] ?? '') . ' & ' . ($wi['wanita_nama'] ?? ''), ' &')
-        : bayarNamaKlien($c));
+    // Nama dari data klien yang dipegang admin — BUKAN nama lengkap yang bisa
+    // diubah pengantin lewat dashboard: kwitansi yang sudah terbit tidak
+    // boleh berubah isinya setelah dikirim.
+    $namaKlien = bayarNamaKlien($c);
 
     $pdf = new PdfPenawaran('P', 'mm', 'A4');
     $pdf->SetMargins(18, 18, 18);

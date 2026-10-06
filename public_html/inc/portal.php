@@ -22,6 +22,12 @@ require_once __DIR__ . '/pipeline.php';
 require_once __DIR__ . '/paket.php';
 require_once __DIR__ . '/bayar.php';
 
+/** Pesan bentrok versi — portal.php memakainya untuk TIDAK mengisi ulang formulir dari POST. */
+const PORTAL_GALAT_VERSI = 'Data ini baru saja diperbarui tim kami. Isian di bawah sudah versi terbaru — periksa, ketik ulang perubahan kalian bila masih perlu, lalu simpan.';
+
+/** Batas panjang teks bebas (sama dengan panel admin; kolom TEXT muat ±65 ribu byte). */
+const PORTAL_TEKS_MAKS = 20000;
+
 const PORTAL_ADAT = ['' => '— tidak ada / belum ditentukan —', 'jawa' => 'Jawa', 'chinese' => 'Chinese',
                      'batak' => 'Batak', 'lainnya' => 'Suku lainnya'];
 
@@ -37,16 +43,32 @@ function portalToken(int $clientId): string
     return (string) (one("SELECT portal_token FROM clients WHERE id = ?", [$clientId])['portal_token'] ?? '');
 }
 
+// Tautan baru / dimatikan → penanda "sudah dibuka" ikut direset: tautan
+// baru belum pernah dibuka siapa pun.
 function portalPutar(int $clientId): string
 {
     $baru = bin2hex(random_bytes(16));
-    q("UPDATE clients SET portal_token = ? WHERE id = ?", [$baru, $clientId]);
+    q("UPDATE clients SET portal_token = ?, portal_seen_at = NULL WHERE id = ?", [$baru, $clientId]);
     return $baru;
 }
 
 function portalMatikan(int $clientId): void
 {
-    q("UPDATE clients SET portal_token = NULL WHERE id = ?", [$clientId]);
+    q("UPDATE clients SET portal_token = NULL, portal_seen_at = NULL WHERE id = ?", [$clientId]);
+}
+
+/**
+ * Tautan yang SUDAH ada (tanpa membuat token baru) — untuk teks tagihan,
+ * pengingat cron, dan Ringkasan. Kosong bila dimatikan, belum dibuat, belum
+ * DP, atau sakelar utama mati. Tidak butuh berkas ini dimuat: lihat
+ * bayarTeksTagihan().
+ */
+function portalUrlAda(int $clientId): string
+{
+    if (setting('portal_aktif', '1') === '0') return '';
+    $c = one("SELECT stage, portal_token FROM clients WHERE id = ?", [$clientId]);
+    if (!$c || !$c['portal_token'] || !stageSudahDeal((string) $c['stage'])) return '';
+    return portalUrl($c['portal_token']);
 }
 
 /** URL selalu dari BASE_URL — host form.* diarahkan .htaccess ke formulir. */
@@ -101,7 +123,17 @@ function portalKunci(array $c): bool
 {
     if (in_array($c['stage'], ['harih', 'selesai'], true)) return true;
     $h = (int) setting('portal_kunci_hari', '30');
-    return $h > 0 && $c['wedding_date'] && hariKe($c['wedding_date']) !== null && hariKe($c['wedding_date']) <= $h;
+    if ($h <= 0) return false;
+    // Dihitung dari acara PERTAMA: akad bisa jauh sebelum resepsi, dan
+    // wedding_date diisi dari resepsi lebih dulu.
+    $tgl = array_filter([$c['wedding_date'] ?? null]);
+    try {
+        $wi = one("SELECT akad_tanggal, resepsi_tanggal FROM client_wedding_info WHERE client_id = ?", [(int) $c['id']]);
+        foreach (['akad_tanggal', 'resepsi_tanggal'] as $k) if (!empty($wi[$k])) $tgl[] = $wi[$k];
+    } catch (Throwable $e) { /* kolom lama */ }
+    if (!$tgl) return false;
+    $d = hariKe(min($tgl));
+    return $d !== null && $d <= $h;
 }
 
 function portalBot(): bool
@@ -185,7 +217,9 @@ function portalVersi(int $clientId, string $bagian): string
         'dekor'    => [$wi['dekor_klien'] ?? null],
         default    => [],
     };
-    return sha1(json_encode($isi));
+    // HMAC, bukan sha1 polos: isinya memuat telepon & alamat yang di layar
+    // disamarkan — hash tanpa kunci bisa ditebak ulang dari isian lain.
+    return hash_hmac('sha256', $clientId . '|' . $bagian . '|' . json_encode($isi), APP_KEY . '|portal-versi');
 }
 
 /* ============================================================
@@ -196,7 +230,8 @@ function portalLangkah(array $c, array $rk, array $kel, array $wi, array $meet, 
     $out = [];
     $b = $rk['berikutnya'];
     if ($b && $b['due_date'] && hariKe($b['due_date']) !== null && hariKe($b['due_date']) <= 14) {
-        $out[] = ['#bayar', 'Transfer ' . $b['label'] . ' ' . rupiah($b['sisa']) . ' sebelum ' . tanggalID($b['due_date'])];
+        $out[] = ['#bayar', 'Transfer ' . $b['label'] . ' ' . rupiah($b['sisa'])
+                  . (hariKe($b['due_date']) < 0 ? ' — jatuh tempo ' . tanggalID($b['due_date']) . ' sudah lewat' : ' sebelum ' . tanggalID($b['due_date']))];
     }
     if (!$kunci) {
         $kurang = false;
@@ -246,8 +281,11 @@ function portalSimpan(array $c, string $bagian, array $post): string
     $cid = (int) $c['id'];
     if (portalStatus($c) !== 'aktif' || portalKunci($c)) return 'Data sudah dikunci. Hubungi PIC kalian untuk perubahan.';
     if (!portalBolehSimpan($cid)) return 'Sudah terlalu sering disimpan hari ini. Coba lagi besok atau hubungi PIC.';
-    if (!hash_equals(portalVersi($cid, $bagian), (string) ($post['v'] ?? ''))) {
-        return 'Data ini baru saja diperbarui tim kami. Periksa lagi isiannya, lalu simpan.';
+    if (!hash_equals(portalVersi($cid, $bagian), (string) ($post['v'] ?? ''))) return PORTAL_GALAT_VERSI;
+    foreach (['prosesi_adat_detail', 'dekor_klien'] as $kp) {
+        if (mb_strlen(str_replace("\r", '', (string) ($post[$kp] ?? ''))) > PORTAL_TEKS_MAKS) {
+            return 'Teksnya terlalu panjang (lebih dari ' . number_format(PORTAL_TEKS_MAKS, 0, ',', '.') . ' huruf). Ringkas dulu, atau kirim lewat PIC.';
+        }
     }
 
     $diff = [];
@@ -256,8 +294,10 @@ function portalSimpan(array $c, string $bagian, array $post): string
     try {
         q("INSERT IGNORE INTO client_wedding_info (client_id) VALUES (?)", [$cid]);
         $wi = portalInfo($cid);
+        // Baris baru dari panel tersimpan dengan CRLF; dari sini tanpa \r.
+        // Tanpa disamakan, simpan tanpa perubahan pun tercatat "diperbarui".
         $catat = function (string $label, $lama, $baru) use (&$diff) {
-            if ((string) $lama !== (string) $baru) $diff[] = $label . ': ' . ($lama === null || $lama === '' ? '—' : "'" . mb_strimwidth((string) $lama, 0, 60, '…') . "'")
+            if (str_replace("\r", '', (string) $lama) !== str_replace("\r", '', (string) $baru)) $diff[] = $label . ': ' . ($lama === null || $lama === '' ? '—' : "'" . mb_strimwidth((string) $lama, 0, 60, '…') . "'")
                 . ' → ' . ($baru === null || $baru === '' ? '—' : "'" . mb_strimwidth((string) $baru, 0, 60, '…') . "'");
         };
 
@@ -311,12 +351,12 @@ function portalSimpan(array $c, string $bagian, array $post): string
         } elseif ($bagian === 'prosesi') {
             $adat = array_key_exists((string) ($post['prosesi_adat'] ?? ''), PORTAL_ADAT) ? (string) $post['prosesi_adat'] : '';
             $set = ['prosesi_adat' => $adat, 'prosesi_adat_lainnya' => portalTeks($post['prosesi_adat_lainnya'] ?? '', 120),
-                    'prosesi_adat_detail' => portalTeks($post['prosesi_adat_detail'] ?? '', 4000)];
+                    'prosesi_adat_detail' => portalTeks($post['prosesi_adat_detail'] ?? '', PORTAL_TEKS_MAKS)];
             foreach ($set as $k => $v) $catat($k, $wi[$k] ?? null, $v);
             q("UPDATE client_wedding_info SET prosesi_adat = ?, prosesi_adat_lainnya = ?, prosesi_adat_detail = ? WHERE client_id = ?",
               [...array_values($set), $cid]);
         } elseif ($bagian === 'dekor') {
-            $v = portalTeks($post['dekor_klien'] ?? '', 4000);
+            $v = portalTeks($post['dekor_klien'] ?? '', PORTAL_TEKS_MAKS);
             $catat('Referensi dekor', $wi['dekor_klien'] ?? null, $v);
             q("UPDATE client_wedding_info SET dekor_klien = ? WHERE client_id = ?", [$v, $cid]);
         } else {
@@ -341,8 +381,9 @@ function portalSimpan(array $c, string $bagian, array $post): string
         try {
             $tujuan = (string) setting('wa_admin_office', '');
             if ($tujuan !== '' && waSiap()) {
-                waKirim($tujuan, $c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : '') . ' memperbarui data lewat dashboard pengantin. Cek: '
-                    . url('admin/klien.php?id=' . $cid) . '#datalengkap');
+                waKirim($tujuan, $c['name'] . ($c['partner_name'] ? ' & ' . $c['partner_name'] : '') . ' memperbarui '
+                    . ['keluarga' => 'data keluarga', 'prosesi' => 'prosesi adat', 'dekor' => 'referensi dekor'][$bagian]
+                    . ' lewat dashboard pengantin. Cek: ' . url('admin/klien.php?id=' . $cid) . ($bagian === 'dekor' ? '#dekor' : '#datalengkap'));
             }
         } catch (Throwable $e) { /* notifikasi bukan alasan gagal */ }
     }
@@ -366,6 +407,7 @@ function portalKirim(int $clientId, ?int $userId): array
 {
     $c = one("SELECT id, phone, stage FROM clients WHERE id = ?", [$clientId]);
     if (!$c || !stageSudahDeal($c['stage'])) return ['ok' => false, 'error' => 'Dashboard aktif setelah DP lunas.'];
+    if (setting('portal_aktif', '1') === '0') return ['ok' => false, 'error' => 'Dashboard pengantin sedang dimatikan di Pengaturan.'];
     $teks = portalTeksWA($clientId);
     $waUrl = $c['phone'] ? 'https://wa.me/' . waNomor($c['phone']) . '?text=' . rawurlencode($teks) : '';
     if (!waSiap() || !$c['phone']) return ['ok' => false, 'wa_url' => $waUrl, 'error' => 'Gateway WhatsApp belum tersambung.'];

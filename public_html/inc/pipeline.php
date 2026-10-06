@@ -605,7 +605,7 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
         // Dashboard pengantin ikut mati. Diaktifkan lagi = butuh tautan baru.
         try {
             if (!empty($c['portal_token'])) {
-                q("UPDATE clients SET portal_token = NULL WHERE id = ?", [$id]);
+                q("UPDATE clients SET portal_token = NULL, portal_seen_at = NULL WHERE id = ?", [$id]);
                 $info[] = 'Tautan dashboard pengantin dimatikan.';
             }
         } catch (Throwable $e) { /* kolom belum ada */ }

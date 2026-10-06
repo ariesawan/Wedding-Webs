@@ -245,7 +245,9 @@ function bayarRingkas(int $clientId): array
     }
     return [
         'kontrak' => $kontrak, 'diterima' => $diterima, 'sisa' => max(0, $kontrak - $diterima),
-        'persen' => $kontrak > 0 ? (int) min(100, round($diterima / $kontrak * 100)) : 0,
+        // floor, dan 99 selama masih ada sisa: "100% sudah dibayar" di samping
+        // "Sisa Rp 400.000" membingungkan klien.
+        'persen' => $kontrak > 0 ? (int) min($kontrak - $diterima > 0.5 ? 99 : 100, floor($diterima / $kontrak * 100)) : 0,
         'termin' => $termin, 'berikutnya' => $berikutnya, 'kwitansi' => $kwitansi,
     ];
 }
@@ -439,9 +441,15 @@ function bayarTeksTagihan(array $c, array $termin, string $jenis = 'tagihan'): s
         if ($p['due_date'] && (!$tgl || $p['due_date'] < $tgl)) $tgl = $p['due_date'];
     }
     $rek = rekeningBaris();
+    // Hanya tautan yang SUDAH ada. Membuat token di sini akan menghidupkan
+    // lagi dashboard yang sengaja dimatikan admin. Dibaca langsung supaya
+    // cron & Ringkasan (yang tidak memuat inc/portal.php) memakai teks yang sama.
     $portal = '';
-    if (function_exists('portalUrlKlien') && stageSudahDeal((string) ($c['stage'] ?? ''))) {
-        try { $portal = portalUrlKlien((int) $c['id']); } catch (Throwable $e) { $portal = ''; }
+    if (stageSudahDeal((string) ($c['stage'] ?? '')) && setting('portal_aktif', '1') !== '0') {
+        try {
+            $tok = (string) (one("SELECT portal_token FROM clients WHERE id = ?", [(int) $c['id']])['portal_token'] ?? '');
+            if ($tok !== '') $portal = url('p/' . $tok);
+        } catch (Throwable $e) { $portal = ''; }
     }
     $daftar = implode("\n", $baris) . (count($baris) > 1 ? "\nTotal *" . rupiah($total) . '*' : '');
     $kaki = ($rek ? "\n\nTransfer ke:\n" . implode("\n", $rek) : '')

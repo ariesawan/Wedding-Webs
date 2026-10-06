@@ -62,7 +62,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pesan = ['ok' => '', 'galat' => $galat, 'bagian' => $bagian];
     }
 }
-if (isset($_GET['ok'])) $pesan = ['ok' => 'Tersimpan. Terima kasih!', 'galat' => '', 'bagian' => (string) $_GET['ok']];
+// Hanya pada GET: formulir dikirim ke alamat tanpa ?ok, tapi kalau tetap
+// terbawa, kegagalan simpan tidak boleh tertutup pesan "Tersimpan".
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['ok'])) $pesan = ['ok' => 'Tersimpan. Terima kasih!', 'galat' => '', 'bagian' => (string) $_GET['ok']];
 
 // ---------- Kunjungan pertama ----------
 if (!$admin && empty($c['portal_seen_at']) && !portalBot() && $_SERVER['REQUEST_METHOD'] === 'GET') {
@@ -84,7 +86,14 @@ $waPic = waNomorPic($c['stage']);
 $waTxt = fn(string $t) => 'https://wa.me/' . $waPic . '?text=' . rawurlencode($t);
 $rek  = rekeningBaris();
 $norek = preg_replace('/\D/', '', (string) setting('bank_norek', ''));
-$val  = fn(string $k, $lama = '') => $pesan['galat'] !== '' && isset($_POST[$k]) ? (string) $_POST[$k] : (string) $lama;
+// Isian dikembalikan dari POST bila simpan gagal — KECUALI bentrok versi:
+// saat itu yang tampil harus data terbaru, supaya simpan ulang tidak diam-diam
+// menimpa koreksi tim. Versi tersembunyi tetap versi yang dilihat klien
+// semula, jadi kiriman ulang yang "buta" tetap tertahan.
+$isiUlang = $pesan['galat'] !== '' && $pesan['galat'] !== PORTAL_GALAT_VERSI;
+$val  = fn(string $k, $lama = '') => $isiUlang && isset($_POST[$k]) ? (string) $_POST[$k] : (string) $lama;
+$versi = fn(string $b) => $isiUlang && $pesan['bagian'] === $b && is_string($_POST['v'] ?? null) ? (string) $_POST['v'] : portalVersi($cid, $b);
+$aksiForm = fn(string $b) => e(portalUrl($token)) . '#' . $b;
 $lokasi = $wi['resepsi_lokasi'] ?: ($wi['akad_lokasi'] ?: $c['venue']);
 $tahap = ['deal' => 1, 'persiapan' => 2, 'harih' => 3, 'selesai' => 4][$c['stage']] ?? 1;
 require_once __DIR__ . '/inc/vendor.php';
@@ -307,8 +316,8 @@ legend{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--
         <?php endforeach; ?>
       </dl>
     <?php else: ?>
-      <form method="post" data-jaga>
-        <input type="hidden" name="bagian" value="keluarga"><input type="hidden" name="v" value="<?= e(portalVersi($cid, 'keluarga')) ?>">
+      <form method="post" action="<?= $aksiForm('keluarga') ?>" data-jaga>
+        <input type="hidden" name="bagian" value="keluarga"><input type="hidden" name="v" value="<?= e($versi('keluarga')) ?>">
         <?php foreach (['pria' => 'Pihak mempelai pria', 'wanita' => 'Pihak mempelai wanita'] as $p => $jp): ?>
           <fieldset>
             <legend><?= $jp ?></legend>
@@ -319,7 +328,7 @@ legend{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--
               <div class="f"><label>Dari … bersaudara</label><input type="number" name="<?= $p ?>_dari" min="1" max="20" value="<?= e($val($p . '_dari', $wi[$p . '_dari'] ?? '')) ?>"></div>
             </div>
             <div class="f"><label>Alamat (untuk undangan)</label>
-              <input type="text" name="<?= $p ?>_alamat" maxlength="255" value="" placeholder="<?= ($wi[$p . '_alamat'] ?? '') !== '' ? 'Sudah tersimpan: ' . e(mb_strimwidth((string) $wi[$p . '_alamat'], 0, 14, '…')) . ' — biarkan kosong bila tidak berubah' : 'Sesuai yang dicetak di undangan' ?>"></div>
+              <input type="text" name="<?= $p ?>_alamat" maxlength="255" value="" placeholder="<?= ($wi[$p . '_alamat'] ?? '') !== '' ? 'Sudah tersimpan — biarkan kosong bila tidak berubah' : 'Sesuai yang dicetak di undangan' ?>"></div>
             <?php foreach (['ayah' => 'Ayah', 'ibu' => 'Ibu', 'wali' => 'Wali (bila ada)'] as $r => $jr): $f = $kel["{$p}_{$r}"] ?? null; $k = "{$p}_{$r}"; ?>
               <?php if ($r === 'wali'): ?><details class="wali" <?= $f || $val($k . '_nama') !== '' ? 'open' : '' ?>><summary>+ Wali (bila ada)</summary><?php endif; ?>
               <div class="ortu">
@@ -353,15 +362,15 @@ legend{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--
       <dl class="baca"><dt>Adat</dt><dd><?= e(PORTAL_ADAT[$wi['prosesi_adat'] ?? ''] ?? '—') ?><?= ($wi['prosesi_adat_lainnya'] ?? '') !== '' ? ' — ' . e($wi['prosesi_adat_lainnya']) : '' ?></dd>
         <dt>Urutan prosesi</dt><dd><?= nl2br(e((string) ($wi['prosesi_adat_detail'] ?: '—'))) ?></dd></dl>
     <?php else: ?>
-      <form method="post" data-jaga>
-        <input type="hidden" name="bagian" value="prosesi"><input type="hidden" name="v" value="<?= e(portalVersi($cid, 'prosesi')) ?>">
+      <form method="post" action="<?= $aksiForm('prosesi') ?>" data-jaga>
+        <input type="hidden" name="bagian" value="prosesi"><input type="hidden" name="v" value="<?= e($versi('prosesi')) ?>">
         <div class="dua">
           <div class="f"><label>Adat</label><select name="prosesi_adat">
             <?php foreach (PORTAL_ADAT as $kA => $vA): ?><option value="<?= e($kA) ?>" <?= $val('prosesi_adat', $wi['prosesi_adat'] ?? '') === $kA ? 'selected' : '' ?>><?= e($vA) ?></option><?php endforeach; ?></select></div>
           <div class="f"><label>Kalau suku lain, sebutkan</label><input type="text" name="prosesi_adat_lainnya" maxlength="120" value="<?= e($val('prosesi_adat_lainnya', $wi['prosesi_adat_lainnya'] ?? '')) ?>"></div>
         </div>
         <div class="f"><label>Urutan prosesi (salin apa adanya dari keluarga)</label>
-          <textarea name="prosesi_adat_detail" maxlength="4000"><?= e($val('prosesi_adat_detail', $wi['prosesi_adat_detail'] ?? '')) ?></textarea></div>
+          <textarea name="prosesi_adat_detail" maxlength="<?= PORTAL_TEKS_MAKS ?>"><?= e($val('prosesi_adat_detail', $wi['prosesi_adat_detail'] ?? '')) ?></textarea></div>
         <div class="aksi"><button class="btn isi" type="submit">Simpan prosesi</button></div>
       </form>
     <?php endif; ?>
@@ -376,9 +385,9 @@ legend{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--
     <?php if (!$bisaIsi): ?>
       <p><?= nl2br(e((string) ($wi['dekor_klien'] ?: '—'))) ?></p>
     <?php else: ?>
-      <form method="post" data-jaga>
-        <input type="hidden" name="bagian" value="dekor"><input type="hidden" name="v" value="<?= e(portalVersi($cid, 'dekor')) ?>">
-        <div class="f"><textarea name="dekor_klien" maxlength="4000" placeholder="Contoh: sage & ivory, bunga segar, pelaminan kayu. https://pin.it/…"><?= e($val('dekor_klien', $wi['dekor_klien'] ?? '')) ?></textarea></div>
+      <form method="post" action="<?= $aksiForm('dekor') ?>" data-jaga>
+        <input type="hidden" name="bagian" value="dekor"><input type="hidden" name="v" value="<?= e($versi('dekor')) ?>">
+        <div class="f"><textarea name="dekor_klien" maxlength="<?= PORTAL_TEKS_MAKS ?>" placeholder="Contoh: sage & ivory, bunga segar, pelaminan kayu. https://pin.it/…"><?= e($val('dekor_klien', $wi['dekor_klien'] ?? '')) ?></textarea></div>
         <div class="aksi"><button class="btn isi" type="submit">Kirim referensi</button></div>
       </form>
     <?php endif; ?>

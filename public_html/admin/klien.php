@@ -208,7 +208,7 @@ function simpanDataLengkap(int $id, int $userId): void
             WHERE client_id = ?",
           [mb_substr(trim($_POST['prosesi_adat']), 0, 40),
            mb_substr(trim($_POST['prosesi_adat_lainnya'] ?? ''), 0, 120),
-           trim($_POST['prosesi_adat_detail'] ?? ''), $id]);
+           mb_substr(trim($_POST['prosesi_adat_detail'] ?? ''), 0, PORTAL_TEKS_MAKS), $id]);
     }
 
     // Orang tua. Baris yang namanya dikosongi dihapus, bukan disimpan kosong —
@@ -430,7 +430,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (isset($_POST['portal_v'])) {
                 $vSekarang = portalVersi($id, 'keluarga') . '|' . portalVersi($id, 'prosesi');
                 if (!hash_equals($vSekarang, (string) $_POST['portal_v'])) {
-                    throw new RuntimeException('Klien baru saja mengubah data lewat dashboard pengantin — muat ulang halaman, periksa, lalu simpan lagi.');
+                    // Jangan buang ketikan admin: simpan sebagai draf, kembalikan
+                    // ke formulir (diisi ulang skrip), dan tunjukkan bentroknya.
+                    $draf = $_POST;
+                    unset($draf['_csrf'], $draf['act'], $draf['portal_v'], $draf['id']);
+                    $_SESSION['dl_draf'] = ['id' => $id, 'isi' => $draf, 'at' => time()];
+                    flash('Klien baru saja mengubah data keluarga/prosesi lewat dashboard pengantin, jadi isianmu BELUM disimpan. '
+                        . 'Isianmu sudah dikembalikan ke formulir — bandingkan dengan perubahan klien di Riwayat, lalu simpan lagi.', 'warn');
+                    redirect('admin/klien.php?id=' . $id . '#datalengkap');
                 }
             }
 
@@ -498,6 +505,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             q("INSERT INTO client_wedding_info (client_id, konsep_dekor) VALUES (?, ?)
                ON DUPLICATE KEY UPDATE konsep_dekor = VALUES(konsep_dekor)", [$id, $konsep]);
             clientLog($id, 'catatan', 'Konsep dekor diperbarui', mb_strimwidth($konsep, 0, 160, '…'), $user['id']);
+            try { q("UPDATE clients SET portal_isi_at = NULL WHERE id = ?", [$id]); } catch (Throwable $e) {}
             flash('Konsep dekor tersimpan.');
             redirect('admin/klien.php?id=' . $id . '#dekor');
         }
@@ -508,6 +516,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$cP) throw new RuntimeException('Klien tidak ditemukan.');
             if (!stageSudahDeal($cP['stage'])) throw new RuntimeException('Dashboard pengantin aktif setelah DP lunas.');
             $kelola = in_array($user['role'] ?? '', ['owner', 'admin_office'], true);
+            if (in_array($act, ['portal_kirim', 'portal_buat'], true) && setting('portal_aktif', '1') === '0')
+                throw new RuntimeException('Dashboard pengantin sedang dimatikan di Pengaturan.');
             if ($act === 'portal_kirim') {
                 $r = portalKirim($id, (int) $user['id']);
                 if (!empty($r['ok'])) flash('Tautan dashboard pengantin terkirim ke WhatsApp klien.');
@@ -1171,7 +1181,7 @@ if ($c):
                   onclick="return confirm('DP benar-benar sudah masuk ke rekening? Kalau lunas, klien diserahkan ke admin office.')">Konfirmasi DP masuk</button>
                 <?php if ($c['phone']): ?>
                   <label class="inline"><input type="checkbox" name="kirim_kwitansi" value="1" <?= waSiap() ? 'checked' : '' ?>> Kirim kwitansi ke WA</label>
-                  <label class="inline"><input type="checkbox" name="kirim_portal" value="1" <?= waSiap() ? 'checked' : '' ?>> Kirim tautan dashboard pengantin</label>
+                  <label class="inline"><input type="checkbox" name="kirim_portal" value="1" <?= waSiap() && setting('portal_aktif', '1') !== '0' ? 'checked' : '' ?><?= setting('portal_aktif', '1') === '0' ? ' disabled' : '' ?>> Kirim tautan dashboard pengantin</label>
                 <?php endif; ?>
               </div>
             </form>
@@ -1294,7 +1304,8 @@ if ($c):
         <?= setting('portal_aktif', '1') === '0' ? '<b style="color:var(--rose)">Semua dashboard sedang dimatikan di Pengaturan.</b>' : '' ?></p>
       <?php if (!empty($c['portal_isi_at'])): ?>
         <p class="flash warn" style="margin:8px 0"><span>Ada isian baru dari klien <?= e(mb_strtolower(labelHari(substr($c['portal_isi_at'], 0, 10)))) ?> —
-          <a href="#datalengkap" style="color:inherit;text-decoration:underline">periksa Biodata lengkap</a>.</span></p>
+          periksa <a href="#datalengkap" style="color:inherit;text-decoration:underline">Biodata lengkap</a>
+          dan <a href="#dekor" style="color:inherit;text-decoration:underline">Acara &amp; dekor</a> (rinciannya di Riwayat).</span></p>
       <?php endif; ?>
       <?php if ($waUrlP): ?><p style="margin:8px 0"><a class="btn sm solid" href="<?= e($waUrlP) ?>" target="_blank" rel="noopener">Buka WhatsApp ↗</a></p><?php endif; ?>
       <?php if ($purl): ?>
@@ -1302,7 +1313,7 @@ if ($c):
           <button class="btn sm" type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.value).then(()=>{this.textContent='Tersalin ✓'})">Salin</button></div>
       <?php endif; ?>
       <div class="aksi" style="margin-top:10px">
-        <?php if ($c['phone']): ?>
+        <?php if ($c['phone'] && setting('portal_aktif', '1') !== '0'): ?>
           <form method="post" style="display:inline"><?= csrfField() ?><input type="hidden" name="act" value="portal_kirim"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
             <button class="btn sm solid" type="submit"><?= $purl ? 'Kirim ulang ke WhatsApp' : 'Kirim ke WhatsApp klien' ?></button></form>
         <?php endif; ?>
@@ -1758,6 +1769,30 @@ if ($c):
         <input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
         <input type="hidden" name="data_lengkap" value="1">
         <input type="hidden" name="portal_v" value="<?= e(portalVersi((int) $c['id'], 'keluarga') . '|' . portalVersi((int) $c['id'], 'prosesi')) ?>">
+        <?php
+          $dlDraf = $_SESSION['dl_draf'] ?? null;
+          if ($dlDraf && (int) $dlDraf['id'] === (int) $c['id'] && $dlDraf['at'] > time() - 1800):
+            unset($_SESSION['dl_draf']); ?>
+          <p class="flash warn" style="margin:0 0 12px"><span>Formulir di bawah berisi <b>isianmu yang belum tersimpan</b> — klien sempat mengubah data di
+            dashboard pengantin. Cek Riwayat untuk melihat perubahan klien, sesuaikan, lalu simpan.</span></p>
+          <script type="application/json" id="dlDraf"><?= json_encode($dlDraf['isi'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?></script>
+          <script>
+          (() => {
+            // Isi ulang formulir dari draf; nama field PHP (a[b]) dipetakan apa adanya.
+            const f = document.currentScript.closest('form');
+            let d = {}; try { d = JSON.parse(document.getElementById('dlDraf').textContent || '{}'); } catch (_) {}
+            const isi = (nama, nilai) => {
+              if (nilai !== null && typeof nilai === 'object') { Object.entries(nilai).forEach(([k, v]) => isi(nama + '[' + k + ']', v)); return; }
+              f.querySelectorAll('[name="' + CSS.escape(nama) + '"]').forEach(el => {
+                if (el.type === 'checkbox' || el.type === 'radio') el.checked = el.value === String(nilai);
+                else el.value = String(nilai);
+              });
+            };
+            // Dijalankan setelah seluruh formulir terurai (skrip ini ada di atasnya).
+            document.addEventListener('DOMContentLoaded', () => Object.entries(d).forEach(([k, v]) => isi(k, v)));
+          })();
+          </script>
+        <?php endif; ?>
         <?php if (!empty($c['portal_isi_at'])): ?>
           <p class="flash warn" style="margin:0 0 12px"><span>Ada isian baru dari klien lewat dashboard pengantin <?= e(mb_strtolower(labelHari(substr($c['portal_isi_at'], 0, 10)))) ?>.
             Perubahannya tercatat di Riwayat. Menyimpan formulir ini menandainya sudah diperiksa.</span></p>
