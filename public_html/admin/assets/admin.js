@@ -84,7 +84,38 @@
   /* ---------- Konfirmasi hapus yang tidak mengandalkan confirm() polos ---------- */
   document.querySelectorAll('form[data-confirm]').forEach(f => {
     f.addEventListener('submit', e => {
-      if (!confirm(f.dataset.confirm)) e.preventDefault();
+      // {jumlah} diganti nominal yang sedang terisi, supaya yang dikonfirmasi
+      // adalah angka yang benar-benar akan dicatat.
+      let pesan = f.dataset.confirm;
+      if (pesan.includes('{jumlah}')) {
+        const j = f.querySelector('[name=jumlah], input[data-rp]');
+        const n = (j?.value || '').replace(/\D/g, '');
+        pesan = pesan.replace('{jumlah}', n ? new Intl.NumberFormat('id-ID').format(n) : '0');
+      }
+      if (!confirm(pesan)) e.preventDefault();
+    });
+  });
+
+  /* ---------- Kirim sekali: kunci tombol setelah ditekan ----------
+     Uang tercatat dua kali atau tagihan terkirim dua kali adalah kesalahan
+     paling mahal di panel ini — terutama dari ponsel dengan sinyal lemah.
+     Dipasang SETELAH konfirmasi: kalau konfirmasi dibatalkan, tombol tetap hidup. */
+  document.querySelectorAll('form[data-sekali]').forEach(f => {
+    f.addEventListener('submit', e => {
+      if (e.defaultPrevented) return;
+      if (f.dataset.terkirim) { e.preventDefault(); return; }
+      f.dataset.terkirim = '1';
+      const b = f.querySelector('button[type=submit], button:not([type])');
+      if (b) setTimeout(() => { b.disabled = true; b.dataset.asal = b.textContent; b.textContent = 'Menyimpan…'; }, 0);
+    });
+  });
+  // Kembali lewat tombol Back (bfcache): hidupkan lagi tombolnya.
+  window.addEventListener('pageshow', e => {
+    if (!e.persisted) return;
+    document.querySelectorAll('form[data-terkirim]').forEach(f => {
+      delete f.dataset.terkirim;
+      const b = f.querySelector('button[disabled]');
+      if (b) { b.disabled = false; if (b.dataset.asal) b.textContent = b.dataset.asal; }
     });
   });
 
@@ -183,5 +214,94 @@
         form.querySelectorAll('input[data-rp]').forEach(i => { i.value = i.value.replace(/\D/g, ''); });
       });
     }
+  });
+})();
+
+
+/* ===========================================================
+   Ringkasan
+   =========================================================== */
+(() => {
+  /* ---------- Saringan antrean: tautan biasa, disaring di tempat ---------- */
+  document.querySelectorAll('nav.saring').forEach(nav => {
+    const kartu = nav.closest('section') || document;
+    const kosong = kartu.querySelector('.saring-kosong');
+    const terap = (k) => {
+      let terlihat = 0;
+      const perTier = {};
+      kartu.querySelectorAll('li.q').forEach(li => {
+        const cocok = !k || (li.dataset.saring || '').split(' ').includes(k);
+        li.hidden = !cocok;
+        if (cocok) { terlihat++; const t = (li.className.match(/\bt(\d)\b/) || [])[1]; perTier[t] = (perTier[t] || 0) + 1; }
+      });
+      kartu.querySelectorAll('li.tier-lab').forEach(l => {
+        const n = perTier[l.dataset.tier] || 0;
+        l.hidden = n === 0;
+        const b = l.querySelector('b'); if (b) b.textContent = n;
+      });
+      nav.querySelectorAll('a').forEach(a => a.setAttribute('aria-pressed', (a.dataset.saring || '') === k ? 'true' : 'false'));
+      if (kosong) kosong.hidden = terlihat > 0;
+      // Baris yang tersembunyi di balik "Tampilkan n lainnya" ikut terbuka saat menyaring.
+      kartu.querySelectorAll('details.antrean-lebih').forEach(d => { if (k) d.open = true; });
+    };
+    nav.addEventListener('click', e => {
+      const a = e.target.closest('a[data-saring]');
+      if (!a) return;
+      e.preventDefault();
+      const k = a.dataset.saring || '';
+      terap(k);
+      try {
+        const u = new URL(location.href);
+        if (k) u.searchParams.set('saring', k); else u.searchParams.delete('saring');
+        u.hash = '';
+        history.replaceState(null, '', u.toString());
+      } catch (_) {}
+    });
+    const awal = (nav.querySelector('a[aria-pressed=true]') || {}).dataset?.saring || '';
+    if (awal) terap(awal);
+  });
+
+  /* ---------- Jam relatif pertemuan: diperbarui tiap menit ---------- */
+  const relatif = (t) => {
+    const a = Date.parse(t.dataset.mulai), b = Date.parse(t.dataset.selesai), n = Date.now();
+    if (isNaN(a)) return;
+    let s = '';
+    if (n >= b) s = 'selesai';
+    else if (n >= a) s = 'sedang berlangsung';
+    else {
+      const m = Math.ceil((a - n) / 60000);
+      if (m <= 90) s = 'mulai ' + m + ' menit lagi';
+      else if (new Date(a).toDateString() === new Date(n).toDateString()) s = 'mulai ' + Math.round(m / 60) + ' jam lagi';
+    }
+    t.textContent = s;
+  };
+  const jam = document.querySelectorAll('time[data-mulai]');
+  if (jam.length) setInterval(() => jam.forEach(relatif), 60000);
+
+  /* ---------- Grafik: ketuk/arahkan → angka ditulis ke keterangan (aria-live) ---------- */
+  document.querySelectorAll('figure.grafik').forEach(fig => {
+    const ket = fig.querySelector('[data-keterangan]');
+    if (!ket) return;
+    const asal = ket.textContent;
+    const tulis = (el) => { ket.textContent = el ? el.getAttribute('data-tip') : asal; };
+    fig.addEventListener('mouseover', e => { const el = e.target.closest('[data-tip]'); if (el) tulis(el); });
+    fig.addEventListener('mouseleave', () => tulis(null));
+    fig.addEventListener('focusin', e => { const el = e.target.closest('[data-tip]'); if (el) tulis(el); });
+    fig.addEventListener('click', e => { const el = e.target.closest('[data-tip]'); if (el && !el.closest('a')) tulis(el); });
+  });
+
+  /* ---------- Bagian lipat yang terbuka di layar lebar ---------- */
+  if (matchMedia('(min-width:1000px)').matches) document.querySelectorAll('details[data-buka-lebar]').forEach(d => { d.open = true; });
+
+  /* ---------- Popover (DP masuk, Lainnya): satu terbuka, klik di luar menutup ---------- */
+  const pop = 'details.pop-dp, details.lainnya';
+  document.addEventListener('toggle', e => {
+    const d = e.target;
+    if (!(d instanceof HTMLDetailsElement) || !d.matches(pop) || !d.open) return;
+    document.querySelectorAll(pop).forEach(x => { if (x !== d) x.open = false; });
+  }, true);
+  document.addEventListener('click', e => {
+    if (e.target.closest(pop)) return;
+    document.querySelectorAll(pop + '[open]').forEach(x => { x.open = false; });
   });
 })();

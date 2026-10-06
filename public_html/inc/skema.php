@@ -307,6 +307,24 @@ function skemaV24(): void
         q("UPDATE payments p JOIN payment_templates t ON t.kode = p.kode AND p.kode <> ''
               SET p.offset_hari = t.offset_hari");
     }
+
+    // ---- Ringkasan: hitungan meeting per klien tanpa memindai seluruh tabel ----
+    if (skemaAdaKolom('meetings', 'client_id') && !one("SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = 'meetings' AND INDEX_NAME = 'idx_meetings_client'")) {
+        try { db()->exec("ALTER TABLE meetings ADD KEY idx_meetings_client (client_id)"); }
+        catch (PDOException $e) { if (!str_contains($e->getMessage(), 'Duplicate key name')) throw $e; }
+    }
+
+    // Checklist lama menulis "DP diterima dan dicatat" sebagai langkah H-90
+    // yang terbuka walau DP-nya sudah lunas — di Ringkasan jadi "lewat tempo"
+    // palsu. Tandai selesai pada tanggal DP-nya lunas.
+    if (skemaAdaTabel('client_tasks')) {
+        q("UPDATE client_tasks t
+             JOIN payments p ON p.id = (SELECT p2.id FROM payments p2 WHERE p2.client_id = t.client_id
+                                         ORDER BY (p2.kode = 'dealing') DESC, p2.wajib DESC, p2.sort_order, p2.id LIMIT 1)
+              SET t.done_at = CAST(p.paid_at AS DATETIME)
+            WHERE t.done_at IS NULL AND t.title = 'DP diterima dan dicatat' AND p.paid_at IS NOT NULL");
+    }
 }
 
 /**

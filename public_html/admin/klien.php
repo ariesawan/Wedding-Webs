@@ -8,6 +8,7 @@ require_once __DIR__ . '/../inc/wa.php';
 require_once __DIR__ . '/../inc/penawaran.php';
 require_once __DIR__ . '/../inc/bayar.php';
 require_once __DIR__ . '/../inc/portal.php';
+require_once __DIR__ . '/../inc/ringkasan.php';
 $user = requireLogin();
 
 /**
@@ -487,7 +488,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pesan .= !empty($kp['ok']) ? ' Tautan dashboard pengantin terkirim.' : ' Tautan dashboard belum terkirim — kirim dari kartu Dashboard pengantin.';
             }
             flash($pesan . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
-            redirect('admin/klien.php?id=' . $id);
+            redirect(kembaliRingkasan() ?? 'admin/klien.php?id=' . $id);
         }
 
         elseif ($act === 'dekor') {
@@ -545,7 +546,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $r  = clientSetStage($id, $_POST['stage'] ?? '', $user['id'], trim($_POST['note'] ?? ''));
             flash('Tahap diperbarui.' . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
-            redirect('admin/klien.php?id=' . $id);
+            redirect(kembaliRingkasan() ?? 'admin/klien.php?id=' . $id);
         }
 
         elseif ($act === 'susunan') {
@@ -664,7 +665,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
               [trim($_POST['next_action'] ?? ''), trim($_POST['next_action_at'] ?? '') ?: null, $id]);
             flash('Tindakan berikutnya diperbarui.');
-            redirect('admin/klien.php?id=' . $id);
+            redirect(kembaliRingkasan() ?? 'admin/klien.php?id=' . $id);
         }
 
         elseif ($act === 'task_generate') {
@@ -677,10 +678,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         elseif ($act === 'task_toggle') {
             $tid = (int) $_POST['task_id'];
             $t   = one("SELECT * FROM client_tasks WHERE id = ? AND client_id = ?", [$tid, (int) $_POST['id']]);
-            if ($t) {
+            if ($t && ($_POST['hanya'] ?? '') === 'selesai') {
+                // Dari Ringkasan: hanya MENANDAI selesai, tidak pernah membatalkan.
+                // Tab yang basi tidak boleh membuka lagi langkah yang sudah beres.
+                if (!$t['done_at']) {
+                    q("UPDATE client_tasks SET done_at = COALESCE(done_at, NOW()) WHERE id = ?", [$tid]);
+                    clientLog((int) $t['client_id'], 'tugas', 'Langkah selesai: ' . $t['title'], '', (int) $user['id']);
+                    flash('Langkah "' . $t['title'] . '" ditandai selesai.');
+                }
+            } elseif ($t) {
                 q("UPDATE client_tasks SET done_at = " . ($t['done_at'] ? 'NULL' : 'NOW()') . " WHERE id = ?", [$tid]);
             }
-            redirect('admin/klien.php?id=' . (int) $_POST['id'] . '#checklist');
+            redirect(kembaliRingkasan() ?? 'admin/klien.php?id=' . (int) $_POST['id'] . '#checklist');
         }
 
         elseif ($act === 'task_add') {
@@ -749,7 +758,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             : ' Kwitansi belum terkirim: ' . ($k['error'] ?? '?');
                 }
                 flash($pesan);
-                redirect($act === 'pay_paid' && $cB['stage'] === 'dp' ? 'admin/klien.php?id=' . $id : $ke);
+                redirect(kembaliRingkasan() ?? ($act === 'pay_paid' && $cB['stage'] === 'dp' ? 'admin/klien.php?id=' . $id : $ke));
             }
 
             if ($act === 'pay_batal') {
@@ -772,11 +781,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($act === 'pay_kirim_tagihan') {
                 $ids = $pid ? [$pid] : array_map('intval', (array) ($_POST['payment_ids'] ?? []));
-                $k = bayarKirimTagihan($id, $ids, (int) $user['id']);
+                $jenisT = in_array($_POST['jenis'] ?? '', ['sebelum', 'telat'], true) ? $_POST['jenis'] : 'tagihan';
+                $k = bayarKirimTagihan($id, $ids, (int) $user['id'], $jenisT);
                 if (!empty($k['ok'])) flash('Tagihan terkirim ke WhatsApp klien.');
                 elseif (!empty($k['wa_url'])) { $_SESSION['wa_url'] = $k['wa_url']; flash('Gateway WhatsApp belum tersambung — tekan "Buka WhatsApp" untuk mengirim manual.', 'warn'); }
                 else throw new RuntimeException($k['error'] ?? 'Tagihan gagal dikirim.');
-                redirect($ke);
+                redirect(kembaliRingkasan() ?? $ke);
             }
 
             if ($act === 'pay_save') {
@@ -895,6 +905,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } catch (Throwable $e) {
         flash($e->getMessage(), 'err');
+        if ($k = kembaliRingkasan()) redirect($k);
         redirect('admin/klien.php' . (!empty($_POST['id']) ? '?id=' . (int) $_POST['id'] : ''));
     }
 }
@@ -1179,17 +1190,25 @@ if ($c):
 
       <?php elseif ($stage === 'deal'):
         $meetOffice = array_filter($meets, fn($m) => $m['status'] !== 'canceled' && (!$c['handover_at'] || $m['start_at'] >= $c['handover_at']));
-        $venueAda = !empty($wi['resepsi_lokasi']) || !empty($wi['akad_lokasi']) || !empty($c['venue']); ?>
+        $vAktif = array_filter($vAda, fn($v) => ($v['status'] ?? '') !== 'batal');
+        // Sama persis dengan kolom Kesiapan di Ringkasan admin office.
+        $siapDeal = array_column(kesiapanDeal([
+            'id' => $c['id'], 'data_lengkap_at' => $c['data_lengkap_at'],
+            'lokasi' => ($wi['resepsi_lokasi'] ?? '') ?: (($wi['akad_lokasi'] ?? '') ?: $c['venue']),
+            'ada_dekor' => trim((string) ($wi['konsep_dekor'] ?? '')) !== '',
+            'n_vendor' => count($vAktif), 'n_termin' => count($pays), 'n_meeting' => count($meetOffice),
+        ]), 'ok', 'kunci');
+        $venueAda = $siapDeal['venue']; ?>
         <h2>Deal — susun acara bersama klien</h2>
         <p class="sub">DP sudah masuk<?= !empty($c['handover_at']) ? ' ' . e(mb_strtolower(labelHari(substr($c['handover_at'], 0, 10)))) : '' ?><?= $c['deal_value'] ? ' · kontrak ' . rupiah((float) $c['deal_value']) : '' ?>.
           Lengkapi bersama klien, lalu mulai persiapan.</p>
         <ul class="butir">
-          <?= $butir(!empty($c['data_lengkap_at']), 'Biodata lengkap &amp; keluarga mempelai', '#datalengkap') ?>
+          <?= $butir($siapDeal['biodata'], 'Biodata lengkap &amp; keluarga mempelai', '#datalengkap') ?>
           <?= $butir($venueAda, $venueAda ? 'Venue: ' . e($wi['resepsi_lokasi'] ?? '' ?: ($wi['akad_lokasi'] ?? '' ?: $c['venue'])) : 'Pilih venue &amp; jam acara', '#data') ?>
-          <?= $butir(trim((string) ($wi['konsep_dekor'] ?? '')) !== '', 'Konsep &amp; susunan dekor', '#dekor') ?>
-          <?= $butir((bool) $vAda, $vAda ? count($vAda) . ' vendor dipilih' : 'Pilih vendor', '#vendor') ?>
-          <?= $butir(count($pays) > 1, $pays ? count($pays) . ' termin pembayaran tersusun' : 'Susun termin pembayaran', '#uang') ?>
-          <?= $butir((bool) $meetOffice, $meetOffice ? count($meetOffice) . ' meeting tercatat' : 'Jadwalkan meeting pertama', 'jadwal.php?new=1&client=' . (int) $c['id']) ?>
+          <?= $butir($siapDeal['dekor'], 'Konsep &amp; susunan dekor', '#dekor') ?>
+          <?= $butir($siapDeal['vendor'], $vAktif ? count($vAktif) . ' vendor dipilih' : 'Pilih vendor', '#vendor') ?>
+          <?= $butir($siapDeal['termin'], $pays ? count($pays) . ' termin pembayaran tersusun' : 'Susun termin pembayaran', '#uang') ?>
+          <?= $butir($siapDeal['meeting'], $meetOffice ? count($meetOffice) . ' meeting tercatat' : 'Jadwalkan meeting pertama', 'jadwal.php?new=1&client=' . (int) $c['id']) ?>
           <?= $butir(!empty($c['portal_seen_at']), !empty($c['portal_seen_at']) ? 'Dashboard pengantin sudah dibuka klien' : 'Kirim dashboard pengantin ke klien', '#portal') ?>
         </ul>
         <div class="aksi">

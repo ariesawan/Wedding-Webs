@@ -156,7 +156,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         // Klien yang sudah DP tidak diarsipkan dari hasil satu
                         // pertemuan — pembatalan kontrak perlu keputusan sadar.
                         q("UPDATE clients SET next_action = ?, next_action_at = CURDATE() WHERE id = ?",
-                          ['Klien ragu melanjutkan — bahas dengan owner', $cid]);
+                          [TINDAKAN_RAGU, $cid]);
                         $pesan .= ' Klien sudah DP, jadi tidak diarsipkan otomatis. Ubah tahapnya manual bila memang batal.';
                     } else {
                         clientSetStage($cid, 'batal', $user['id'], $ket ?: 'Tidak berlanjut setelah konsultasi.');
@@ -183,7 +183,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } catch (Throwable $e) {
         flash($e->getMessage(), 'err');
     }
-    if ($act !== 'save') redirect('admin/jadwal.php');
+    if ($act !== 'save') redirect(kembaliRingkasan() ?? 'admin/jadwal.php');
 }
 
 $edit   = isset($_GET['edit']) ? one("SELECT * FROM meetings WHERE id = ?", [(int) $_GET['edit']]) : null;

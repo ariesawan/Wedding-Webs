@@ -355,8 +355,11 @@ const FORM_KOLOM_DAFTAR = "f.id, f.created_at, f.ip, f.status, f.client_id, f.na
 /** Jumlah kiriman yang perlu dicek — untuk lencana menu. */
 function formPerluCekJumlah(int $hari = 30): int
 {
+    // Dihitung sekali per permintaan: lencana menu dan Ringkasan sama-sama memakainya.
+    static $memo = [];
+    if (isset($memo[$hari])) return $memo[$hari];
     try {
-        return (int) (one("SELECT COUNT(*) n FROM form_masuk f
+        return $memo[$hari] = (int) (one("SELECT COUNT(*) n FROM form_masuk f
                     WHERE f.status IN ('galat','ditolak') AND f.client_id IS NULL
                       AND f.ditangani = 0 AND CHAR_LENGTH(f.wa) >= 10
                       AND f.created_at > DATE_SUB(NOW(), INTERVAL ? DAY)

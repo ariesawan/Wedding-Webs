@@ -50,7 +50,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } catch (Throwable $e) {
         flash($e->getMessage(), 'err');
     }
-    redirect('admin/formulir.php' . (isset($_GET['f']) ? '?f=' . urlencode((string) $_GET['f']) : ''));
+    redirect(kembaliRingkasan() ?? 'admin/formulir.php' . (isset($_GET['f']) ? '?f=' . urlencode((string) $_GET['f']) : ''));
 }
 
 $filter = $_GET['f'] ?? 'cek';

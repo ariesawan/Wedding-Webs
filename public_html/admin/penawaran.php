@@ -200,7 +200,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ? 'Klien cocok. Tahap: Menunggu DP — tagih DP 30%, lalu tandai lunas begitu masuk; klien otomatis diserahkan ke admin office.'
                     : 'Disetujui.')
                 . ($r['info'] ? "\n" . implode("\n", $r['info']) : ''));
-            redirect('admin/klien.php?id=' . $cid);
+            redirect(kembaliRingkasan() ?? 'admin/klien.php?id=' . $cid);
         }
 
         elseif ($act === 'tidak_cocok') {
@@ -217,6 +217,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('admin/penawaran.php?id=' . $qid);
     } catch (Throwable $e) {
         flash($e->getMessage(), 'err');
+        if ($k = kembaliRingkasan()) redirect($k);
         redirect('admin/penawaran.php' . ($qid ? '?id=' . $qid : (!empty($_POST['client_id']) ? '?client=' . (int) $_POST['client_id'] : '')));
     }
 }

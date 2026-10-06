@@ -186,3 +186,167 @@ function rentangUsia(?int $u): ?string
         default  => '45+',
     };
 }
+
+/* ============================================================
+   GRAFIK RINGKASAN OWNER (v24)
+   ============================================================
+   Aturan yang sama untuk ketiganya:
+   - satu warna data (--grafik), deret kedua dibedakan bentuk (isi vs garis
+     tepi / titik penuh vs cincin), bukan warna kedua — warna ember kedua
+     gagal uji kontras di mode gelap;
+   - viewBox tetap + preserveAspectRatio meet: teks tidak pernah melar;
+   - setiap tanda punya <title> dan data-tip (dibaca skrip ke keterangan
+     aria-live, karena layar sentuh tidak punya hover);
+   - selalu ada padanan teks: kalimat ringkas + tabel di <details>. */
+
+/** Batang dengan ujung atas membulat 4px, menapak di garis dasar. */
+function grafikBatangPath(float $x, float $yAtas, float $w, float $yDasar, float $r = 4): string
+{
+    $h = $yDasar - $yAtas;
+    if ($h <= 0) return '';
+    $r = min($r, $h, $w / 2);
+    return sprintf('M%.1f %.1fL%.1f %.1fQ%.1f %.1f %.1f %.1fL%.1f %.1fQ%.1f %.1f %.1f %.1fL%.1f %.1fZ',
+        $x, $yDasar, $x, $yAtas + $r, $x, $yAtas, $x + $r, $yAtas,
+        $x + $w - $r, $yAtas, $x + $w, $yAtas, $x + $w, $yAtas + $r, $x + $w, $yDasar);
+}
+
+/**
+ * Arus kas 12 bulan: diterima (isi) di bulan lalu & berjalan, dijadwalkan
+ * (garis tepi) di bulan berjalan & ke depan.
+ * $slot: [['bln','label','tahun','masuk','jadwal','nMasuk','nJadwal','kini','depan'], …]
+ */
+function grafikKas(array $slot, string $judul = 'Arus kas'): string
+{
+    $maks = 0.0;
+    foreach ($slot as $s) $maks = max($maks, $s['masuk'] + ($s['kini'] || $s['depan'] ? $s['jadwal'] : 0));
+    if ($maks <= 0) return '';
+
+    $W = 360; $H = 176; $kiri = 6; $kanan = 354; $atas = 34; $dasar = 146;
+    $n = count($slot); $lebarSlot = ($kanan - $kiri) / $n; $wb = 16;
+    $skala = fn(float $v) => $v / $maks * ($dasar - $atas);
+    $svg = '<svg viewBox="0 0 ' . $W . ' ' . $H . '" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="'
+         . e($judul) . '" class="grafik-svg">';
+    foreach ([0.5, 1.0] as $g) {
+        $y = round($dasar - $g * ($dasar - $atas), 1);
+        $svg .= '<line x1="' . $kiri . '" y1="' . $y . '" x2="' . $kanan . '" y2="' . $y . '" class="g-garis"/>'
+              . '<text x="' . $kiri . '" y="' . ($y - 3) . '" class="g-sumbu">' . e(rupiah($maks * $g, true)) . '</text>';
+    }
+    $svg .= '<line x1="' . $kiri . '" y1="' . $dasar . '" x2="' . $kanan . '" y2="' . $dasar . '" class="g-dasar"/>';
+
+    $labelNilai = [];
+    $iMaks = null; $vMaks = -1;
+    foreach ($slot as $i => $s) {
+        $tot = $s['masuk'] + ($s['kini'] || $s['depan'] ? $s['jadwal'] : 0);
+        if ($tot > $vMaks) { $vMaks = $tot; $iMaks = $i; }
+    }
+    foreach ($slot as $i => $s) {
+        $cx = $kiri + $lebarSlot * $i + $lebarSlot / 2;
+        $x = $cx - $wb / 2;
+        $masuk = $s['masuk'];
+        $jadwal = ($s['kini'] || $s['depan']) ? $s['jadwal'] : 0.0;
+        $yMasuk = $dasar - $skala($masuk);
+        if ($masuk > 0) {
+            // Bulan berjalan dengan sisa jadwal di atasnya: ujung atas bagian
+            // bawah tidak dibulatkan — yang membulat hanya ujung tumpukan.
+            $r = $jadwal > 0 ? 0 : 4;
+            $svg .= '<path d="' . grafikBatangPath($x, $yMasuk, $wb, $dasar, $r) . '" class="g-isi"/>';
+        }
+        if ($jadwal > 0) {
+            $alas = $masuk > 0 ? $yMasuk - 2 : $dasar;
+            $yJ = $alas - $skala($jadwal);
+            if ($alas - $yJ < 2) $yJ = $alas - 2;
+            $svg .= '<path d="' . grafikBatangPath($x + 0.75, $yJ, $wb - 1.5, $alas) . '" class="g-garis-tepi"/>';
+        }
+        $tot = $masuk + $jadwal;
+        if ($tot <= 0) {
+            $svg .= '<text x="' . round($cx, 1) . '" y="' . ($dasar - 4) . '" text-anchor="middle" class="g-kosong">—</text>';
+        } elseif ($s['kini'] || $i === $iMaks) {
+            $yTop = $dasar - $skala($tot) - ($masuk > 0 && $jadwal > 0 ? 2 : 0);
+            $svg .= '<text x="' . round($cx, 1) . '" y="' . round(max(24, $yTop - 4), 1) . '" text-anchor="middle" class="g-nilai">'
+                  . e(rupiah($tot, true)) . '</text>';
+        }
+        $svg .= '<text x="' . round($cx, 1) . '" y="' . ($dasar + 15) . '" text-anchor="middle" class="g-bulan' . ($s['kini'] ? ' kini' : '') . '">'
+              . e($s['label'] . ($s['kini'] ? '*' : '')) . '</text>';
+        if ($s['kini']) {
+            $xg = round($kiri + $lebarSlot * ($i + 1), 1);
+            // Label "ke depan →" di pita paling atas, di atas label nilai batang.
+            $svg .= '<line x1="' . $xg . '" y1="2" x2="' . $xg . '" y2="' . ($dasar + 4) . '" class="g-batas"/>'
+                  . '<text x="' . ($xg + 4) . '" y="10" class="g-sumbu">ke depan →</text>';
+        }
+        $tip = $s['label'] . ' ' . $s['tahun'] . ' · '
+             . implode(' · ', array_filter([
+                 $masuk > 0 ? 'diterima ' . rupiah($masuk, true) . ' (' . $s['nMasuk'] . ' klien)' : '',
+                 $jadwal > 0 ? 'dijadwalkan ' . rupiah($jadwal, true) . ' (' . $s['nJadwal'] . ' termin)' : '',
+             ]) ?: ['tidak ada']);
+        $svg .= '<rect x="' . round($kiri + $lebarSlot * $i, 1) . '" y="0" width="' . round($lebarSlot, 1) . '" height="' . $H
+              . '" class="g-hit" data-tip="' . e($tip) . '" tabindex="0"><title>' . e($tip) . '</title></rect>';
+    }
+    return $svg . '</svg>';
+}
+
+/**
+ * Tanggal terisi 6 bulan: satu titik per acara, ditumpuk dari bawah.
+ * Penuh = DP masuk; cincin = menunggu DP.
+ */
+function grafikTanggal(array $rows, string $judul = 'Tanggal terisi'): string
+{
+    $bulan = [];
+    $awal = strtotime(date('Y-m-01'));
+    for ($i = 0; $i < 6; $i++) {
+        $t = strtotime('+' . $i . ' month', $awal);
+        $bulan[date('Y-m', $t)] = ['label' => BULAN_PENDEK[(int) date('n', $t)] ?? date('M', $t), 'b' => (int) date('n', $t),
+                                   'y' => (int) date('Y', $t), 'isi' => []];
+    }
+    foreach ($rows as $r) {
+        $k = substr((string) $r['wedding_date'], 0, 7);
+        if (isset($bulan[$k])) $bulan[$k]['isi'][] = $r;
+    }
+    $maks = max(3, ...array_map(fn($b) => count($b['isi']), array_values($bulan)));
+    // Lebar sengaja kecil: grafik ini tinggal di kolom samping (~260px),
+    // supaya titik 10px tetap 10px di layar, bukan mengecil jadi 7px.
+    $W = 264; $jarak = 15; $atas = 10; $dasar = $atas + $maks * $jarak; $H = $dasar + 34;
+    $lebar = $W / 6;
+    $svg = '<svg viewBox="0 0 ' . $W . ' ' . $H . '" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="'
+         . e($judul) . '" class="grafik-svg">';
+    $svg .= '<line x1="4" y1="' . ($dasar + 4) . '" x2="' . ($W - 4) . '" y2="' . ($dasar + 4) . '" class="g-dasar"/>';
+    $i = 0;
+    foreach ($bulan as $b) {
+        $cx = $lebar * $i + $lebar / 2;
+        foreach ($b['isi'] as $j => $r) {
+            $cy = $dasar - 4 - $j * $jarak;
+            $tunggu = $r['stage'] === 'dp';
+            $tip = namaPasangan($r) . ' · ' . tglPendek($r['wedding_date']) . ($r['lokasi'] ? ' · ' . $r['lokasi'] : '')
+                 . ($tunggu ? ' · menunggu DP' : ' · DP masuk');
+            $svg .= '<a href="klien.php?id=' . (int) $r['id'] . '" class="g-titik-a">'
+                  . '<rect x="' . round($cx - 14, 1) . '" y="' . round($cy - 7, 1) . '" width="28" height="14" class="g-hit" data-tip="' . e($tip) . '"/>'
+                  . '<circle cx="' . round($cx, 1) . '" cy="' . round($cy, 1) . '" r="' . ($tunggu ? 4.25 : 5) . '" class="' . ($tunggu ? 'g-cincin' : 'g-titik') . '">'
+                  . '<title>' . e($tip) . '</title></circle></a>';
+        }
+        $svg .= '<a href="klien.php?b=' . $b['b'] . '&amp;y=' . $b['y'] . '">'
+              . '<text x="' . round($cx, 1) . '" y="' . ($dasar + 18) . '" text-anchor="middle" class="g-bulan">' . e($b['label']) . '</text></a>'
+              . '<text x="' . round($cx, 1) . '" y="' . ($dasar + 30) . '" text-anchor="middle" class="g-sumbu">' . count($b['isi']) . '</text>';
+        $i++;
+    }
+    return $svg . '</svg>';
+}
+
+/**
+ * Baris batang HTML untuk corong. $baris: [['label','n','dasar','sub','href','catatan'], …]
+ * Lebar batang = bagian dari baris pertama. Batang aria-hidden — angkanya teks.
+ */
+function grafikBaris(array $baris): string
+{
+    if (!$baris) return '';
+    $dasar = max(1, (int) $baris[0]['n']);
+    $out = '<ol class="corong-baris">';
+    foreach ($baris as $b) {
+        $w = round(min(100, (int) $b['n'] / $dasar * 100), 1);
+        $out .= '<li><div class="cb-atas"><span class="cb-label">' . e($b['label']) . '</span>'
+              . '<span class="cb-n">' . (int) $b['n'] . '</span>'
+              . ($b['rasio'] !== '' ? '<span class="cb-rasio">' . e($b['rasio']) . '</span>' : '') . '</div>'
+              . '<div class="cb-jalur" aria-hidden="true"><i style="width:' . $w . '%"></i></div>'
+              . ($b['catatan'] !== '' ? '<div class="cb-catat">' . $b['catatan'] . '</div>' : '')
+              . '</li>';
+    }
+    return $out . '</ol>';
+}

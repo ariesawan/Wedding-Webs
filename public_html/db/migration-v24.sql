@@ -240,6 +240,28 @@ UPDATE payments p JOIN payment_templates t ON t.kode = p.kode AND p.kode <> ''
 
 DROP PROCEDURE IF EXISTS `v24_tambah_kolom`;
 
+-- ---- v24: Ringkasan — indeks meeting per klien ----
+DROP PROCEDURE IF EXISTS `v24_indeks_meeting`;
+DELIMITER $$
+CREATE PROCEDURE `v24_indeks_meeting`()
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+                    AND TABLE_NAME = 'meetings' AND INDEX_NAME = 'idx_meetings_client') THEN
+        ALTER TABLE meetings ADD KEY idx_meetings_client (client_id);
+    END IF;
+END$$
+DELIMITER ;
+CALL v24_indeks_meeting();
+DROP PROCEDURE IF EXISTS `v24_indeks_meeting`;
+
+-- Langkah checklist "DP diterima dan dicatat" yang masih terbuka padahal
+-- DP-nya sudah lunas: tandai selesai pada tanggal lunasnya.
+UPDATE client_tasks t
+  JOIN payments p ON p.id = (SELECT p2.id FROM payments p2 WHERE p2.client_id = t.client_id
+                              ORDER BY (p2.kode = 'dealing') DESC, p2.wajib DESC, p2.sort_order, p2.id LIMIT 1)
+   SET t.done_at = CAST(p.paid_at AS DATETIME)
+ WHERE t.done_at IS NULL AND t.title = 'DP diterima dan dicatat' AND p.paid_at IS NOT NULL;
+
 -- Template lama menyimpan harga per baris; model sekarang "paket + rincian
 -- isi" — jumlahnya dipindah jadi harga paket (sekali saja: hanya template
 -- yang harga paketnya masih kosong).
@@ -260,7 +282,8 @@ ON DUPLICATE KEY UPDATE `v` = VALUES(`v`);
 -- =====================================================================
 -- VERIFIKASI — harus: kolom_v19 = 4, kolom_tamu = 2, kategori_wo = 1,
 --              tahap_dp = 1, kolom_paket = 7, tabel_form = 1,
---              kolom_bayar = 4, tabel_penerimaan = 1, kolom_portal = 3
+--              kolom_bayar = 4, tabel_penerimaan = 1, kolom_portal = 3,
+--              indeks_meeting = 1
 -- =====================================================================
 SELECT
   (SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -285,4 +308,7 @@ SELECT
     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'payment_receipts')           AS tabel_penerimaan,
   (SELECT COUNT(*) FROM information_schema.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'clients'
-      AND COLUMN_NAME IN ('portal_token','portal_seen_at','portal_isi_at'))        AS kolom_portal;
+      AND COLUMN_NAME IN ('portal_token','portal_seen_at','portal_isi_at'))        AS kolom_portal,
+  (SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'meetings'
+      AND INDEX_NAME = 'idx_meetings_client')                                      AS indeks_meeting;

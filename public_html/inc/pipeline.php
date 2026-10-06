@@ -102,6 +102,13 @@ const PIPE_ACTIVE = ['baru', 'pricelist', 'dp', 'deal', 'persiapan', 'harih'];
 const TAHAP_EARLY  = ['baru', 'pricelist', 'dp', 'spesifikasi', 'penawaran'];
 const TAHAP_OFFICE = ['deal', 'persiapan', 'harih'];
 
+/**
+ * Tindakan yang dipasang saat klien yang sudah DP menjawab "tidak lanjut" di
+ * pertemuan. Teksnya dipakai sebagai penanda di Ringkasan owner — kalau diubah
+ * tangan, artinya sudah ditangani dan barisnya hilang dengan sendirinya.
+ */
+const TINDAKAN_RAGU = 'Klien ragu melanjutkan — bahas dengan owner';
+
 /** Tahap yang boleh dipilih di "Ubah tahap manual". */
 const TAHAP_PILIHAN = ['baru', 'pricelist', 'dp', 'deal', 'persiapan', 'harih', 'selesai', 'batal'];
 
@@ -290,16 +297,33 @@ function terminSusun(int $clientId): int
     return $n;
 }
 
+/**
+ * Tanggal langkah checklist: dihitung mundur dari hari-H, tapi tidak pernah
+ * lahir di masa lalu. Klien yang deal 60 hari sebelum acara tidak perlu
+ * melihat "Survei lokasi — lewat 39 hari" sejak hari pertama; langkah itu
+ * jatuh tempo hari ini saja (sama seperti termin yang dijepit ke +3 hari).
+ */
+function tugasTempo(string $weddingDate, int $offset): string
+{
+    $due = date('Y-m-d', strtotime($weddingDate . ' ' . $offset . ' day'));
+    return $offset <= 0 ? max($due, min(date('Y-m-d'), $weddingDate)) : $due;
+}
+
 /** Susun checklist persiapan. Hanya kalau belum ada satu pun. */
 function checklistSusun(int $clientId): int
 {
     if ((int) (one("SELECT COUNT(*) n FROM client_tasks WHERE client_id = ?", [$clientId])['n'] ?? 0)) return 0;
     $tgl = one("SELECT wedding_date FROM clients WHERE id = ?", [$clientId])['wedding_date'] ?? null;
+    // DP yang sudah lunas tidak perlu jadi langkah "lewat tempo" — klien baru
+    // sampai di sini SETELAH DP masuk. "Kontrak ditandatangani" tetap manual:
+    // contract_signed_at berarti DP masuk, bukan kertas yang sudah diteken.
+    $dp = terminDp($clientId);
     $n = 0;
     foreach (TASK_TEMPLATE as $i => [$off, $judul, $detail]) {
-        $due = $tgl ? date('Y-m-d', strtotime($tgl . " $off day")) : null;
-        q("INSERT INTO client_tasks (client_id, title, detail, offset_day, due_date, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?)", [$clientId, $judul, $detail, $off, $due, $i * 10]);
+        $due = $tgl ? tugasTempo($tgl, (int) $off) : null;
+        $selesai = $judul === 'DP diterima dan dicatat' && $dp && $dp['paid_at'] ? $dp['paid_at'] . ' 00:00:00' : null;
+        q("INSERT INTO client_tasks (client_id, title, detail, offset_day, due_date, done_at, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?)", [$clientId, $judul, $detail, $off, $due, $selesai, $i * 10]);
         $n++;
     }
     return $n;
@@ -645,7 +669,7 @@ function retimeTasks(int $clientId, string $weddingDate): int
     $rows = all("SELECT id, offset_day FROM client_tasks WHERE client_id = ? AND done_at IS NULL", [$clientId]);
     foreach ($rows as $r) {
         q("UPDATE client_tasks SET due_date = ? WHERE id = ?",
-          [date('Y-m-d', strtotime($weddingDate . ' ' . $r['offset_day'] . ' day')), $r['id']]);
+          [tugasTempo($weddingDate, (int) $r['offset_day']), $r['id']]);
     }
     return count($rows);
 }

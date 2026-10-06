@@ -242,10 +242,4 @@ $pillB = ['lunas' => 'live', 'sebagian' => 'warn', 'lewat' => 'bad', 'hari_ini' 
     <p class="hint" style="margin-top:14px"><?= $isDpB ? 'DP dicatat admin early atau owner.' : 'Pembayaran klien yang sudah deal dicatat admin office atau owner.' ?></p>
   <?php endif; ?>
 </div>
-<script>
-// Tombol kirim dikunci setelah ditekan: pembayaran tercatat dua kali adalah
-// kesalahan paling mahal di tab ini.
-document.querySelectorAll('form[data-sekali]').forEach(f => f.addEventListener('submit', () => {
-  const b = f.querySelector('button[type=submit]'); if (b) setTimeout(() => { b.disabled = true; b.textContent = 'Menyimpan…'; }, 0);
-}));
-</script>
+<?php /* Kunci tombol form[data-sekali] kini ada di assets/admin.js (berlaku di semua halaman). */ ?>

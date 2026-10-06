@@ -52,6 +52,25 @@ function redirect(string $path): never
     exit;
 }
 
+/**
+ * Tujuan kembali setelah aksi satu-ketuk dari Ringkasan.
+ *
+ * Hanya tiga nilai yang dikenal — bukan URL — jadi tidak bisa dipakai untuk
+ * mengalihkan ke situs lain. Jangkar disaring ke huruf kecil, angka, dan
+ * tanda hubung supaya admin mendarat tepat di baris antrean berikutnya.
+ */
+function kembaliRingkasan(): ?string
+{
+    $ke = [
+        'ringkasan'        => 'admin/index.php',
+        'ringkasan-early'  => 'admin/index.php?lihat=early',
+        'ringkasan-office' => 'admin/index.php?lihat=office',
+    ][(string) ($_POST['kembali'] ?? '')] ?? null;
+    if ($ke === null) return null;
+    $j = substr(preg_replace('/[^a-z0-9-]/', '', strtolower((string) ($_POST['jangkar'] ?? ''))), 0, 24);
+    return $ke . ($j !== '' ? '#' . $j : '');
+}
+
 /** Token CSRF per-sesi. */
 function csrfToken(): string
 {
