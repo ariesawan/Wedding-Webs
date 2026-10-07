@@ -412,16 +412,26 @@ function quoteCocok(int $quoteId, ?int $userId = null): array
     if ($praDp) {
         $r = clientMajuKe($cid, 'dp', $userId, $jenis . ' ' . $qq['nomor'] . ' cocok.');
         if (!$r['changed']) $r = clientSetStage($cid, 'dp', $userId, $jenis . ' ' . $qq['nomor'] . ' cocok.');
-        return ['tahap' => 'dp', 'info' => $r['info']];
+        // Klien yang pernah membayar sebagian DP lalu cocok dengan paket lebih
+        // murah: DP-nya bisa langsung lunas saat termin disesuaikan.
+        $serah = dpCekSerahTerima($cid, $userId);
+        return ['tahap' => $serah ? 'deal' : 'dp', 'info' => array_merge($r['info'], $serah)];
     }
 
     // Sudah di Menunggu DP / sudah deal: angka kontrak berubah.
     $n = terminSusun($cid) ?: terminSesuaikan($cid);
     if ($qq['stage'] === 'dp' && ($dp = terminDp($cid)) && !$dp['paid_at']) {
-        // Tagihan DP di tindakan berikutnya ikut angka baru.
+        // Tagihan DP di tindakan berikutnya ikut angka baru; tenggat yang sudah
+        // lewat diperbarui di termin-nya juga, supaya tagihan, pengingat, dan
+        // antrean menyebut tanggal yang sama.
+        $due = $dp['due_date'];
+        if (!$due || $due < date('Y-m-d')) {
+            $due = date('Y-m-d', strtotime('+' . max(1, (int) setting('dp_tenggat_hari', '3')) . ' day'));
+            q("UPDATE payments SET due_date = ? WHERE id = ?", [$due, $dp['id']]);
+        }
         q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
           ['Tagih ' . ((float) $dp['terbayar'] > 0 ? 'kekurangan ' : '') . $dp['label'] . ' · ' . rupiah(max(0, (float) $dp['amount'] - (float) $dp['terbayar'])),
-           $dp['due_date'] && $dp['due_date'] >= date('Y-m-d') ? $dp['due_date'] : date('Y-m-d', strtotime('+3 day')), $cid]);
+           $due, $cid]);
     }
     // Kontrak lebih murah bisa membuat DP yang sudah dibayar sebagian jadi lunas.
     $serah = $qq['stage'] === 'dp' ? dpCekSerahTerima($cid, $userId) : [];

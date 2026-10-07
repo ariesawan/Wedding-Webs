@@ -20,7 +20,7 @@ function kwitansiPdf(int $receiptId): string
         throw new RuntimeException('Kwitansi tidak ditemukan.');
     }
     $c = one("SELECT id, name, partner_name, wedding_date FROM clients WHERE id = ?", [$r['client_id']]);
-    $grup = all("SELECT r.id, r.jumlah, r.status, r.payment_id, p.label, p.amount
+    $grup = all("SELECT r.id, r.jumlah, r.status, r.payment_id, r.kontrak_saat, COALESCE(r.termin_saat, p.amount) AS amount, p.label
                  FROM payment_receipts r JOIN payments p ON p.id = r.payment_id
                  WHERE r.client_id = ? AND r.kwitansi_no = ? AND r.status = ?
                  ORDER BY p.sort_order, p.id", [$r['client_id'], $r['kwitansi_no'], $r['status']]);
@@ -34,8 +34,9 @@ function kwitansiPdf(int $receiptId): string
     $batasId = max(array_map(fn($g) => (int) $g['id'], $grup) ?: [(int) $r['id']]);
     $diterimaSaatItu = (float) (one("SELECT COALESCE(SUM(jumlah),0) v FROM payment_receipts
                                      WHERE client_id = ? AND status = 'sah' AND id <= ?", [$r['client_id'], $batasId])['v'] ?? 0);
-    $sisaSaatItu = max(0, $rk['kontrak'] - $diterimaSaatItu);
-    $terakhir = !one("SELECT 1 FROM payment_receipts WHERE client_id = ? AND status = 'sah' AND id > ? LIMIT 1", [$r['client_id'], $batasId]);
+    // Nilai kontrak saat terbit (kwitansi lama sebelum kolom ini ada: nilai sekarang).
+    $kontrakSaatItu = (float) (max(array_map(fn($g) => (float) $g['kontrak_saat'], $grup) ?: [0]) ?: $rk['kontrak']);
+    $sisaSaatItu = max(0, $kontrakSaatItu - $diterimaSaatItu);
     foreach ($grup as $i => $g) {
         $grup[$i]['dibayar'] = (float) (one("SELECT COALESCE(SUM(jumlah),0) v FROM payment_receipts
                                              WHERE payment_id = ? AND status = 'sah' AND id <= ?", [$g['payment_id'], $batasId])['v'] ?? 0);
@@ -122,17 +123,12 @@ function kwitansiPdf(int $receiptId): string
     // ---------- Ringkasan kontrak ----------
     $pdf->Ln(2);
     $pdf->judul('Ringkasan pembayaran');
-    $pdf->barisAngka('Nilai kontrak', rupiah($rk['kontrak']));
+    $pdf->barisAngka('Nilai kontrak', rupiah($kontrakSaatItu));
     $pdf->barisAngka('Sudah diterima', rupiah($diterimaSaatItu));
     $pdf->barisAngka('Sisa', $sisaSaatItu > 0.5 ? rupiah($sisaSaatItu) : 'Rp 0', 'B');
-    // "Berikutnya" hanya di kwitansi terbaru — di kwitansi lama info itu basi.
-    if ($rk['berikutnya'] && $terakhir && !$batal) {
-        $b = $rk['berikutnya'];
-        $pdf->SetFont('Helvetica', '', 8.8);
-        $pdf->warna(PdfPenawaran::ABU);
-        $pdf->MultiCell($lebar, 4.6, pdfTeks('Berikutnya: ' . $b['label'] . ' ' . rupiah($b['sisa'])
-            . ($b['due_date'] ? ', paling lambat ' . tanggalID($b['due_date']) : '') . '.'), 0, 'L');
-    }
+    // Tagihan berikutnya TIDAK dicetak: dokumen yang sudah terbit tidak boleh
+    // berubah isinya. Info itu ada di pesan WhatsApp pengirim kwitansi dan di
+    // dashboard pengantin.
 
     // ---------- Tanda tangan ----------
     $pdf->Ln(10);
@@ -149,7 +145,7 @@ function kwitansiPdf(int $receiptId): string
     $pdf->Cell(62, 5, pdfTeks($ttd), 'T', 1, 'C');
 
     // ---------- Cap ----------
-    $cap = $batal ? 'DIBATALKAN' : ($sisaSaatItu <= 0.5 && $rk['kontrak'] > 0 ? 'LUNAS' : '');
+    $cap = $batal ? 'DIBATALKAN' : ($sisaSaatItu <= 0.5 && $kontrakSaatItu > 0 ? 'LUNAS' : '');
     if ($cap !== '') {
         $pdf->SetFont('Helvetica', 'B', 26);
         [$rr, $gg, $bb] = $batal ? [176, 58, 58] : [47, 115, 85];

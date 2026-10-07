@@ -133,19 +133,22 @@ function bayarCatat(int $clientId, float $jumlah, string $tanggal, string $metod
 
         $pdo->beginTransaction();
         $no = kwitansiNomorBaru($tanggal);
+        // Dipotret untuk kwitansi: isinya tidak boleh berubah ketika kontrak
+        // atau termin berubah setelah kwitansi terkirim.
+        $kontrakSaat = (float) (one("SELECT COALESCE(SUM(amount),0) v FROM payments WHERE client_id = ?", [$clientId])['v'] ?? 0);
         $sisaUang = $jumlah; $alokasi = []; $idPertama = 0;
         foreach ($termin as $p) {
             if ($sisaUang <= 0.004) break;
             $ambil = min(bayarSisa($p), $sisaUang);
             if ($ambil <= 0) continue;
             q("INSERT INTO payment_receipts (client_id, payment_id, kwitansi_no, tanggal, jumlah, metode, pengirim,
-                                             bukti, status, sumber, catatan, user_id)
-               VALUES (?,?,?,?,?,?,?,?, 'sah', ?, ?, ?)",
+                                             bukti, status, sumber, catatan, user_id, kontrak_saat, termin_saat)
+               VALUES (?,?,?,?,?,?,?,?, 'sah', ?, ?, ?, ?, ?)",
               [$clientId, $p['id'], $no, $tanggal, $ambil, $metode,
                mb_substr(trim((string) ($opt['pengirim'] ?? '')), 0, 120),
                ($opt['bukti'] ?? null) ?: null,
                in_array($opt['sumber'] ?? 'admin', ['admin', 'portal'], true) ? ($opt['sumber'] ?? 'admin') : 'admin',
-               mb_substr(trim((string) ($opt['catatan'] ?? '')), 0, 255), $uid]);
+               mb_substr(trim((string) ($opt['catatan'] ?? '')), 0, 255), $uid, $kontrakSaat, (float) $p['amount']]);
             if (!$idPertama) $idPertama = insertId();
             $sisaUang = round($sisaUang - $ambil, 2);
             $alokasi[] = ['payment_id' => (int) $p['id'], 'label' => $p['label'], 'jumlah' => $ambil,

@@ -281,6 +281,8 @@ function skemaV24(): void
         `kwitansi_wa_at` DATETIME NULL,
         `dicek_at` DATETIME NULL,
         `dicek_oleh` INT UNSIGNED NULL,
+        `kontrak_saat` DECIMAL(14,2) NULL COMMENT 'Total termin klien saat kwitansi terbit',
+        `termin_saat` DECIMAL(14,2) NULL COMMENT 'Nominal termin ini saat kwitansi terbit',
         `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (`id`),
         KEY `idx_pr_payment` (`payment_id`, `status`),
@@ -288,6 +290,10 @@ function skemaV24(): void
         KEY `idx_pr_kw` (`kwitansi_no`),
         KEY `idx_pr_status` (`status`, `created_at`)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // Kwitansi dibekukan per saat terbit (tabel yang sudah ada dari percobaan sebelumnya).
+    skemaTambahKolom('payment_receipts', 'kontrak_saat', "DECIMAL(14,2) NULL COMMENT 'Total termin klien saat kwitansi terbit' AFTER dicek_oleh");
+    skemaTambahKolom('payment_receipts', 'termin_saat', "DECIMAL(14,2) NULL COMMENT 'Nominal termin ini saat kwitansi terbit' AFTER kontrak_saat");
 
     // Data lama: termin yang sudah ditandai lunas jadi satu penerimaan tanpa
     // nomor kwitansi (tidak pernah dikirim otomatis). Tanggal masa depan —

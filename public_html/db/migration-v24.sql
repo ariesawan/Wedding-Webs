@@ -216,6 +216,8 @@ CREATE TABLE IF NOT EXISTS `payment_receipts` (
   `kwitansi_wa_at` DATETIME NULL,
   `dicek_at` DATETIME NULL,
   `dicek_oleh` INT UNSIGNED NULL,
+  `kontrak_saat` DECIMAL(14,2) NULL,
+  `termin_saat` DECIMAL(14,2) NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_pr_payment` (`payment_id`, `status`),
@@ -223,6 +225,9 @@ CREATE TABLE IF NOT EXISTS `payment_receipts` (
   KEY `idx_pr_kw` (`kwitansi_no`),
   KEY `idx_pr_status` (`status`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CALL v24_tambah_kolom('payment_receipts', 'kontrak_saat', 'DECIMAL(14,2) NULL AFTER dicek_oleh');
+CALL v24_tambah_kolom('payment_receipts', 'termin_saat',  'DECIMAL(14,2) NULL AFTER kontrak_saat');
 
 -- Data lama: termin yang sudah lunas jadi satu penerimaan tanpa nomor kwitansi.
 -- Aman diulang (NOT EXISTS), tanggal masa depan dijepit ke hari ini.

@@ -208,7 +208,7 @@ function simpanDataLengkap(int $id, int $userId): void
             WHERE client_id = ?",
           [mb_substr(trim($_POST['prosesi_adat']), 0, 40),
            mb_substr(trim($_POST['prosesi_adat_lainnya'] ?? ''), 0, 120),
-           mb_substr(trim($_POST['prosesi_adat_detail'] ?? ''), 0, PORTAL_TEKS_MAKS), $id]);
+           mb_substr(trim(str_replace("\r", '', (string) ($_POST['prosesi_adat_detail'] ?? ''))), 0, PORTAL_TEKS_MAKS), $id]);
     }
 
     // Orang tua. Baris yang namanya dikosongi dihapus, bukan disimpan kosong —
@@ -434,8 +434,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!hash_equals($vSekarang, (string) $_POST['portal_v'])) {
                     // Jangan buang ketikan admin: simpan sebagai draf, kembalikan
                     // ke formulir (diisi ulang skrip), dan tunjukkan bentroknya.
-                    $draf = $_POST;
-                    unset($draf['_csrf'], $draf['act'], $draf['portal_v'], $draf['id']);
+                    // Hanya isian yang diubah admin (dibanding potret saat halaman
+                    // dibuka) — isian lain akan tampil dengan data terbaru klien.
+                    // Tanpa potret (JS mati): kembalikan semuanya seperti dulu.
+                    $lewati = ['_csrf', 'act', 'portal_v', 'id', 'dl_awal', 'data_lengkap'];
+                    $awal = json_decode((string) ($_POST['dl_awal'] ?? ''), true);
+                    $draf = [];
+                    if (is_array($awal)) {
+                        foreach (array_unique(array_merge(array_keys($awal), array_keys($_POST))) as $k) {
+                            if (in_array($k, $lewati, true) || is_array($_POST[$k] ?? null)) continue;
+                            $baru = $_POST[$k] ?? null;   // tidak terkirim = kotak centang dilepas
+                            // Peramban mengirim baris baru textarea sebagai CRLF, potret JS memakai LF.
+                            if (str_replace("\r", '', (string) ($awal[$k] ?? '')) !== str_replace("\r", '', (string) ($baru ?? ''))) $draf[$k] = $baru;
+                        }
+                    } else {
+                        $draf = array_diff_key($_POST, array_flip($lewati));
+                    }
                     $_SESSION['dl_draf'] = ['id' => $id, 'isi' => $draf, 'at' => time()];
                     flash('Klien baru saja mengubah data keluarga/prosesi lewat dashboard pengantin, jadi isianmu BELUM disimpan. '
                         . 'Isianmu sudah dikembalikan ke formulir — bandingkan dengan perubahan klien di Riwayat, lalu simpan lagi.', 'warn');
@@ -1332,10 +1346,10 @@ if ($c):
           <form method="post" style="display:inline"><?= csrfField() ?><input type="hidden" name="act" value="portal_kirim"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
             <button class="btn sm solid" type="submit"><?= $purl ? 'Kirim ulang ke WhatsApp' : 'Kirim ke WhatsApp klien' ?></button></form>
         <?php endif; ?>
-        <?php if (!$purl): ?>
+        <?php if (!$purl && setting('portal_aktif', '1') !== '0'): ?>
           <form method="post" style="display:inline"><?= csrfField() ?><input type="hidden" name="act" value="portal_buat"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
             <button class="btn sm" type="submit">Buat tautan</button></form>
-        <?php else: ?>
+        <?php elseif ($purl): ?>
           <a class="btn sm ghost" href="<?= e($purl) ?>" target="_blank" rel="noopener">Lihat sebagai klien ↗</a>
           <?php if (in_array($peranSaya, ['owner', 'admin_office'], true)): ?>
             <form method="post" style="display:inline" onsubmit="return confirm('Buat tautan baru? Tautan lama langsung tidak bisa dibuka.')"><?= csrfField() ?>
@@ -1784,29 +1798,14 @@ if ($c):
         <input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
         <input type="hidden" name="data_lengkap" value="1">
         <input type="hidden" name="portal_v" value="<?= e(portalVersi((int) $c['id'], 'keluarga') . '|' . portalVersi((int) $c['id'], 'prosesi')) ?>">
+        <input type="hidden" name="dl_awal" value="">
         <?php
           $dlDraf = $_SESSION['dl_draf'] ?? null;
           if ($dlDraf && (int) $dlDraf['id'] === (int) $c['id'] && $dlDraf['at'] > time() - 1800):
             unset($_SESSION['dl_draf']); ?>
-          <p class="flash warn" style="margin:0 0 12px"><span>Formulir di bawah berisi <b>isianmu yang belum tersimpan</b> — klien sempat mengubah data di
-            dashboard pengantin. Cek Riwayat untuk melihat perubahan klien, sesuaikan, lalu simpan.</span></p>
+          <p class="flash warn" style="margin:0 0 12px"><span>Formulir di bawah sudah memuat <b>perubahan terbaru dari klien</b>, ditambah
+            <b>isian yang kamu ubah tadi</b> (belum tersimpan). Periksa — terutama isian yang sama-sama diubah (rinciannya di Riwayat) — lalu simpan.</span></p>
           <script type="application/json" id="dlDraf"><?= json_encode($dlDraf['isi'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?></script>
-          <script>
-          (() => {
-            // Isi ulang formulir dari draf; nama field PHP (a[b]) dipetakan apa adanya.
-            const f = document.currentScript.closest('form');
-            let d = {}; try { d = JSON.parse(document.getElementById('dlDraf').textContent || '{}'); } catch (_) {}
-            const isi = (nama, nilai) => {
-              if (nilai !== null && typeof nilai === 'object') { Object.entries(nilai).forEach(([k, v]) => isi(nama + '[' + k + ']', v)); return; }
-              f.querySelectorAll('[name="' + CSS.escape(nama) + '"]').forEach(el => {
-                if (el.type === 'checkbox' || el.type === 'radio') el.checked = el.value === String(nilai);
-                else el.value = String(nilai);
-              });
-            };
-            // Dijalankan setelah seluruh formulir terurai (skrip ini ada di atasnya).
-            document.addEventListener('DOMContentLoaded', () => Object.entries(d).forEach(([k, v]) => isi(k, v)));
-          })();
-          </script>
         <?php endif; ?>
         <?php if (!empty($c['portal_isi_at'])): ?>
           <p class="flash warn" style="margin:0 0 12px"><span>Ada isian baru dari klien lewat dashboard pengantin <?= e(mb_strtolower(labelHari(substr($c['portal_isi_at'], 0, 10)))) ?>.
@@ -1921,7 +1920,7 @@ if ($c):
                    placeholder="Minang, Bugis, Sunda…"></div>
         </div>
         <div class="field"><label>Urutan prosesi</label>
-          <textarea name="prosesi_adat_detail" rows="4"
+          <textarea name="prosesi_adat_detail" rows="4" maxlength="<?= PORTAL_TEKS_MAKS ?>"
             placeholder="Diisi manual — tiap keluarga punya urutan sendiri."><?= e($wi['prosesi_adat_detail'] ?? '') ?></textarea>
           <p class="hint" style="margin:6px 0 0">Ini yang dibaca saat menyusun rundown dan
             technical meeting. Salin apa adanya dari keluarga, jangan dirapikan sendiri.</p></div>
@@ -1930,6 +1929,36 @@ if ($c):
         <?php if (!empty($c['data_lengkap_at'])): ?>
           <p class="hint" style="margin:10px 0 0">Pertama diisi <?= tanggalID(substr($c['data_lengkap_at'], 0, 10)) ?>.</p>
         <?php endif; ?>
+        <script>
+        (() => {
+          // 1) Potret isian saat halaman dibuka (= data di database). Saat
+          //    simpan bentrok dengan isian klien, server hanya mengembalikan
+          //    isian yang BENAR-BENAR diubah admin, bukan seluruh formulir lama.
+          // 2) Bila ada draf dari simpan yang bentrok, timpakan hanya kunci itu.
+          const f = document.currentScript.closest('form');
+          const potret = () => {
+            const o = {};
+            f.querySelectorAll('input[name], select[name], textarea[name]').forEach(el => {
+              if (['_csrf', 'act', 'id', 'portal_v', 'dl_awal', 'data_lengkap'].includes(el.name)) return;
+              if (el.type === 'checkbox' || el.type === 'radio') { if (el.checked) o[el.name] = el.value; else if (!(el.name in o)) o[el.name] = null; }
+              else o[el.name] = el.value;
+            });
+            return o;
+          };
+          const awal = potret();
+          const dEl = document.getElementById('dlDraf');
+          if (dEl) {
+            let d = {}; try { d = JSON.parse(dEl.textContent || '{}'); } catch (_) {}
+            Object.entries(d).forEach(([nama, nilai]) => {
+              f.querySelectorAll('[name="' + CSS.escape(nama) + '"]').forEach(el => {
+                if (el.type === 'checkbox' || el.type === 'radio') el.checked = nilai !== null && el.value === String(nilai);
+                else el.value = nilai === null ? '' : String(nilai);
+              });
+            });
+          }
+          f.addEventListener('submit', () => { f.querySelector('[name=dl_awal]').value = JSON.stringify(awal); });
+        })();
+        </script>
       </form>
     </div>
     </section>
