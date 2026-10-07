@@ -132,7 +132,13 @@ sehari setelah pasang, cron-nya belum jalan.
 - Nilai kontrak berubah → termin yang belum lunas menyesuaikan; tanggal
   pernikahan bergeser → tanggal termin ikut bergeser.
 - DP dikonfirmasi admin early / owner; termin setelah deal oleh admin office /
-  owner.
+  owner. Kalau DP lunas lewat jalan lain (nominal DP diubah, kontrak
+  disesuaikan), klien otomatis diserahkan ke admin office.
+- Klien yang **sudah punya kwitansi tidak bisa dihapus** — tandai *Tidak
+  jadi* saja. Nomor kwitansi tidak pernah dipakai ulang.
+- Kwitansi lama tidak berubah isinya ketika pembayaran berikutnya masuk
+  (tetap tertulis *sebagian*, tidak tiba-tiba dicap *LUNAS*).
+- Ganti paket sebelum DP masuk → DP dan termin ikut nilai baru.
 
 ### Dashboard pengantin
 - Tautan pribadi `callalily.party/p/…` (acak 32 karakter, tidak diindeks).
