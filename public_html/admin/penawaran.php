@@ -502,7 +502,7 @@ pageHead($d['jenisLbl'] . ' ' . $qq['nomor'] . ($qq['revisi'] > 1 ? ' · rev ' .
   <div class="card" style="margin:0">
     <h2>Tanggapan klien</h2>
     <div class="pilih3">
-      <form method="post" class="pilih" onsubmit="return confirm('Klien cocok? Tahap jadi Menunggu DP dan DP 30% (<?= e(rupiah(round($hitung['total'] * 0.3))) ?>) ditagih.')">
+      <form method="post" class="pilih" <?php $dpP = (int) setting('dp_percent', '30') ?: 30; ?>data-confirm="<?= e('Klien cocok? Tahap jadi Menunggu DP dan DP ' . $dpP . '% (' . rupiah(round($hitung['total'] * $dpP / 100)) . ') ditagih.') ?>">
         <?= csrfField() ?><input type="hidden" name="act" value="cocok"><input type="hidden" name="id" value="<?= $qid ?>">
         <b>Cocok</b>
         <span>Lanjut tagih DP 30%<?= $hitung['total'] > 0 ? ' — ' . e(rupiah(round($hitung['total'] * 0.3))) : '' ?>. Setelah DP masuk, klien diserahkan ke admin office.</span>

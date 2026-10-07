@@ -65,7 +65,11 @@ function kwitansiNomorBaru(string $tanggal): string
     $awal = "KW/$th/";
     $n = (int) (one("SELECT MAX(CAST(SUBSTRING(kwitansi_no, ?) AS UNSIGNED)) n FROM payment_receipts
                       WHERE kwitansi_no LIKE ?", [strlen($awal) + 1, $awal . '%'])['n'] ?? 0);
-    return $awal . str_pad((string) ($n + 1), 4, '0', STR_PAD_LEFT);
+    // Penanda tertinggi yang pernah terbit: nomor tidak pernah mundur walau
+    // baris penerimaan terhapus dari database.
+    $n = max($n, (int) setting('kwitansi_n_' . $th, '0')) + 1;
+    settingSet('kwitansi_n_' . $th, (string) $n);
+    return $awal . str_pad((string) $n, 4, '0', STR_PAD_LEFT);
 }
 
 function bayarKunci(): void
@@ -115,6 +119,12 @@ function bayarCatat(int $clientId, float $jumlah, string $tanggal, string $metod
                        ORDER BY (id = ?) DESC, (kode = 'dealing') DESC, due_date IS NULL, due_date, sort_order, id",
                       [$clientId, $pilih]);
         $totalSisa = array_sum(array_map('bayarSisa', $termin));
+        // Termin yang dipilih ternyata sudah lunas (mis. dicatat rekan dari
+        // halaman lain beberapa saat lalu): jangan alihkan diam-diam ke termin
+        // lain — hampir pasti transfer yang sama tercatat dua kali.
+        if ($pilih && (!$termin || (int) $termin[0]['id'] !== $pilih)) {
+            throw new RuntimeException('Termin yang dipilih sudah lunas — kemungkinan transfer ini sudah dicatat. Periksa daftar penerimaan dulu.');
+        }
         if (!$termin) throw new RuntimeException('Semua termin sudah lunas. Tambah termin dulu bila ada tagihan baru.');
         if ($jumlah > $totalSisa + 0.5) {
             throw new RuntimeException('Lebih bayar ' . rupiah($jumlah - $totalSisa) . ' — sisa seluruh tagihan '
@@ -455,6 +465,24 @@ function bayarTeksTagihan(array $c, array $termin, string $jenis = 'tagihan'): s
     $kaki = ($rek ? "\n\nTransfer ke:\n" . implode("\n", $rek) : '')
           . ($portal ? "\n\nRincian & jadwal lengkap: " . $portal : '');
 
+    // Pengingat telat yang ikut memuat termin yang BELUM jatuh tempo: pisahkan,
+    // supaya klien tidak dituduh telat untuk tagihan yang belum waktunya.
+    if ($jenis === 'telat') {
+        $hariIni = date('Y-m-d');
+        $baris = function (array $ps) {
+            return implode("\n", array_map(fn($p) => '• ' . $p['label'] . ' ' . rupiah(bayarSisa($p))
+                . ($p['due_date'] ? ' (jatuh tempo ' . tanggalID($p['due_date']) . ')' : ''), $ps));
+        };
+        $lewat = array_values(array_filter($termin, fn($p) => $p['due_date'] && $p['due_date'] < $hariIni));
+        $nanti = array_values(array_filter($termin, fn($p) => !($p['due_date'] && $p['due_date'] < $hariIni)));
+        if ($lewat && $nanti) {
+            return 'Halo ' . $c['name'] . ', mohon maaf mengganggu. Kami belum menemukan pembayaran berikut:' . "\n" . $baris($lewat)
+                 . "\n\nSekalian mengingatkan yang akan datang:\n" . $baris($nanti)
+                 . "\nTotal *" . rupiah($total) . '*' . $kaki
+                 . "\n\nMungkin sudah ditransfer tapi buktinya belum sampai — bisa dikirim di sini. Perlu penyesuaian jadwal? Balas saja, kami bantu.";
+        }
+    }
+
     return match ($jenis) {
         'sebelum' => 'Halo ' . $c['name'] . ', semoga persiapannya lancar. Kami mengingatkan dengan hormat:' . "\n" . $daftar . $kaki
                    . "\n\nKalau sudah transfer, abaikan pesan ini dan kirim buktinya di sini ya. Terima kasih.",
@@ -487,7 +515,11 @@ function bayarKirimTagihan(int $clientId, array $paymentIds, ?int $userId, strin
     }
     if (!empty($hasil['ok'])) {
         foreach ($termin as $p) {
-            $kode = (($p['due_date'] && $p['due_date'] < date('Y-m-d')) || $jenis === 'telat' ? 'telat@' : 'sebelum@') . ($p['due_date'] ?: '-');
+            // Penanda per termin menurut tanggalnya sendiri: termin yang belum
+            // jatuh tempo tidak boleh ditandai "telat" hanya karena ikut satu
+            // pesan dengan termin lain yang sudah lewat — pengingat telatnya
+            // nanti tidak akan pernah terkirim.
+            $kode = ($p['due_date'] && $p['due_date'] < date('Y-m-d') ? 'telat@' : 'sebelum@') . ($p['due_date'] ?: '-');
             q("UPDATE payments SET ingat_kode = ?, ingat_at = NOW() WHERE id = ?", [$kode, $p['id']]);
         }
         clientLog($clientId, 'bayar', ($jenis === 'tagihan' ? 'Tagihan dikirim' : 'Pengingat pembayaran (' . $jenis . ')'),

@@ -177,8 +177,11 @@ function teksFollowUpPL(array $c, array $q): string
 {
     $paket = trim((string) ($q['q_paket'] ?? $q['paket_nama'] ?? ''));
     $tok = (string) ($q['q_token'] ?? $q['token'] ?? '');
+    $kirim = (string) ($q['q_sent_at'] ?? $q['sent_at'] ?? '');
+    $d = $kirim !== '' ? hariKe($kirim) : null;
+    $kapanKirim = $d === null ? '' : ($d === 0 ? ' hari ini' : ($d === -1 ? ' kemarin' : ' pada ' . tanggalID(substr($kirim, 0, 10))));
     return 'Halo ' . ($c['name'] ?? '') . ', kami ingin menanyakan price list' . ($paket !== '' ? ' ' . $paket : '')
-         . ' yang kami kirim kemarin.' . ($tok !== '' ? ' Bisa dibuka lagi di sini: ' . url('penawaran.php?t=' . $tok) : '')
+         . ' yang kami kirim' . $kapanKirim . '.' . ($tok !== '' ? ' Bisa dibuka lagi di sini: ' . url('penawaran.php?t=' . $tok) : '')
          . "\n\nAda yang ingin ditanyakan atau disesuaikan? Kami bantu.";
 }
 
@@ -467,7 +470,7 @@ function ringkasanEarly(): array
                         WHERE ch.archived = 0 AND ch.is_group = 0 AND ch.unread > 0 AND ch.last_dir = 'masuk'
                           AND ch.jenis IN ('klien','lainnya')
                           AND (ch.client_id IS NULL OR c.stage IN ($in))
-                        ORDER BY ch.last_at LIMIT 10");
+                        ORDER BY ch.last_at DESC LIMIT 10");
         }
 
         $temuPer = $waPer = [];
@@ -635,7 +638,7 @@ function alasanEarly(array $c, array $ctx): array
                 ? aksiLink('Periksa & kirim ' . $c['q_nomor'] . ' →', 'penawaran.php?id=' . (int) $c['q_id'], true)
                 : aksiLink('Lengkapi price list →', 'penawaran.php?id=' . (int) $c['q_id'], true);
         }
-        if (!$c['q_id'] && $c['paket_minat']) {
+        if (!$c['q_id'] && $c['paket_minat'] && $c['paket_minat_nama'] !== null) {   // paket bisa sudah dihapus
             return aksiPost('Siapkan price list ' . $c['paket_minat_nama'], 'penawaran.php',
                             ['act' => 'buat', 'jenis' => 'pricelist', 'client_id' => $id, 'template_id' => (int) $c['paket_minat']], null, true);
         }
@@ -769,12 +772,17 @@ function ringkasanOffice(): array
                           AND c.stage IN ('deal','persiapan','harih','selesai')
                         ORDER BY p.due_date, p.client_id, p.sort_order
                         LIMIT 40");
-        $tugas = all("SELECT t.id, t.client_id, t.title, t.due_date, DATEDIFF(t.due_date, CURDATE()) AS hari_ke_tempo
+        // Termasuk langkah SETELAH acara (H+1 bereskan barang, H+3 testimoni)
+        // milik klien yang sudah 'selesai' — cron memindahkan tahapnya di H+1,
+        // tepat saat langkah itu jatuh tempo.
+        $tugas = all("SELECT t.id, t.client_id, t.title, t.due_date, DATEDIFF(t.due_date, CURDATE()) AS hari_ke_tempo,
+                             c.name, c.partner_name, c.phone, c.stage, c.wedding_date, c.next_action, c.next_action_at, c.created_at
                         FROM client_tasks t
                         JOIN clients c ON c.id = t.client_id
                        WHERE t.done_at IS NULL AND t.due_date IS NOT NULL
                          AND t.due_date <= CURDATE() + INTERVAL 7 DAY
-                         AND c.stage IN ($in)
+                         AND (c.stage IN ($in)
+                              OR (c.stage = 'selesai' AND t.offset_day > 0 AND t.due_date >= CURDATE() - INTERVAL 30 DAY))
                        ORDER BY t.due_date, t.sort_order
                        LIMIT 60");
         $temu = temuLingkup(TAHAP_OFFICE, ['admin_office', 'editor']);
@@ -787,8 +795,8 @@ function ringkasanOffice(): array
                          FROM wa_chats ch
                          LEFT JOIN clients c ON c.id = ch.client_id
                         WHERE ch.archived = 0 AND ch.is_group = 0 AND ch.unread > 0 AND ch.last_dir = 'masuk'
-                          AND (ch.jenis = 'vendor' OR c.stage IN ('deal','persiapan','harih','selesai'))
-                        ORDER BY ch.last_at LIMIT 10");
+                          AND (ch.jenis = 'vendor' OR c.stage IN ('deal','persiapan','harih'))
+                        ORDER BY ch.last_at DESC LIMIT 10");
         }
 
         // Kelompokkan per klien.
@@ -819,10 +827,11 @@ function ringkasanOffice(): array
             }
         }
 
-        // Klien selesai yang masih punya tagihan ikut antrean dari kolom termin sendiri.
+        // Klien selesai yang masih punya tagihan / langkah pasca-acara ikut
+        // antrean dari kolom baris itu sendiri.
         $adaId = array_flip(array_map(fn($a) => (int) $a['id'], $acara));
         $semua = $acara;
-        foreach ($terminPer as $cid => $rows) {
+        foreach ($terminPer + $tugasPer as $cid => $rows) {
             if (isset($adaId[$cid])) continue;
             $p = $rows[0];
             $semua[] = ['id' => $cid, 'name' => $p['name'], 'partner_name' => $p['partner_name'], 'phone' => $p['phone'],
@@ -986,7 +995,21 @@ function alasanOffice(array $c, array $ctx): array
                          [], ['tagihan'], 'termin ' . labelTempo($minggu[0]['due_date']));
     }
 
-    if (!empty($c['tamu'])) return $calon;   // klien selesai: hanya urusan uang
+    if (!empty($c['tamu'])) {
+        // Klien selesai: hanya urusan uang dan langkah setelah acara.
+        if ($ctx['tugas']) {
+            $t0 = $ctx['tugas'][0];
+            $telat = (int) $t0['hari_ke_tempo'] < 0;
+            $calon[] = calon($telat ? 2 : 3, $telat ? 5 : 13,
+                             (count($ctx['tugas']) > 1 ? count($ctx['tugas']) . ' langkah setelah acara · ' : 'Langkah setelah acara: ') . $t0['title'],
+                             kapan(labelTempo($t0['due_date']), $telat),
+                             [aksiPost('✓ ' . mb_strimwidth($t0['title'], 0, 34, '…'), 'klien.php',
+                                       ['act' => 'task_toggle', 'id' => $id, 'task_id' => (int) $t0['id'], 'hanya' => 'selesai'], null, true),
+                              aksiLink('Checklist →', $kCek)],
+                             [], ['checklist'], 'langkah setelah acara', $telat ? abs((int) $t0['hari_ke_tempo']) : 0);
+        }
+        return $calon;
+    }
 
     // ---- Hari-H dekat ----
     $hk = $c['hari_ke_h'] === null ? null : (int) $c['hari_ke_h'];
@@ -1013,7 +1036,10 @@ function alasanOffice(array $c, array $ctx): array
     foreach ($ctx['tugas'] as $t) { if ((int) $t['hari_ke_tempo'] < 0) $tLewat[] = $t; else $tMinggu[] = $t; }
     $tombolTugas = fn(array $t) => aksiPost('✓ ' . mb_strimwidth($t['title'], 0, 34, '…'), 'klien.php',
         ['act' => 'task_toggle', 'id' => $id, 'task_id' => (int) $t['id'], 'hanya' => 'selesai'], null, true);
-    if ($tLewat && !$tunda && ($hk === null || $hk > 7)) {
+    // Langkah lewat tempo TIDAK ikut ditunda next_action: tahap persiapan
+    // selalu punya tindakan bertanggal di depan (diisi sistem), jadi kalau
+    // ditunda, langkah yang telat justru hilang dari antrean.
+    if ($tLewat && ($hk === null || $hk > 7)) {
         $tua = $tLewat[0];
         $teks = count($tLewat) === 1
             ? 'Langkah lewat: ' . $tua['title'] . ' (' . labelTempo($tua['due_date']) . ')'
@@ -1477,24 +1503,25 @@ function corongOwner(): array
 /** Peringatan pengaturan & kesehatan situs. Kosong = tidak ada yang perlu. */
 function perhatianOwner(): array
 {
-    $rows = all("SELECT 'sinkron' AS jenis, m.id, m.client_name AS judul, m.sync_error AS ket, NULL AS n
-                   FROM meetings m WHERE m.sync_error IS NOT NULL AND m.status = 'scheduled'
+    // Batas per cabang, bukan untuk seluruh UNION: kalau tidak, 30 artikel
+    // ber-SEO rendah menggeser hitungan galat formulir sampai hilang.
+    $rows = all("(SELECT 'sinkron' AS jenis, m.id, m.client_name AS judul, m.sync_error AS ket, NULL AS n
+                    FROM meetings m WHERE m.sync_error IS NOT NULL AND m.status = 'scheduled' ORDER BY m.start_at LIMIT 10)
                  UNION ALL
-                 SELECT 'seo', p.id, p.title, CONCAT(p.seo_score, '/100'), NULL
-                   FROM posts p WHERE p.status = 'published' AND p.seo_score < 70
+                 (SELECT 'seo', p.id, p.title, CONCAT(p.seo_score, '/100'), NULL
+                    FROM posts p WHERE p.status = 'published' AND p.seo_score < 70 ORDER BY p.seo_score LIMIT 5)
                  UNION ALL
-                 SELECT 'paket', t.id, t.nama, 'tampil di situs tanpa harga', NULL
-                   FROM quote_templates t WHERE t.is_active = 1 AND t.tampil_web = 1 AND t.harga IS NULL
+                 (SELECT 'paket', t.id, t.nama, 'tampil di situs tanpa harga', NULL
+                    FROM quote_templates t WHERE t.is_active = 1 AND t.tampil_web = 1 AND t.harga IS NULL LIMIT 10)
                  UNION ALL
-                 SELECT 'form', NULL, f.status, NULL, COUNT(*)
-                   FROM form_masuk f WHERE f.created_at >= NOW() - INTERVAL 30 DAY
-                  GROUP BY f.status
+                 (SELECT 'form', NULL, f.status, NULL, COUNT(*)
+                    FROM form_masuk f WHERE f.created_at >= NOW() - INTERVAL 30 DAY
+                   GROUP BY f.status)
                  UNION ALL
-                 SELECT 'analisa', NULL, NULL, NULL, COUNT(*)
-                   FROM clients c
-                  WHERE c.stage IN ('batal','selesai')
-                    AND NOT EXISTS (SELECT 1 FROM client_analisa a WHERE a.client_id = c.id)
-                 LIMIT 30");
+                 (SELECT 'analisa', NULL, NULL, NULL, COUNT(*)
+                    FROM clients c
+                   WHERE c.stage IN ('batal','selesai')
+                     AND NOT EXISTS (SELECT 1 FROM client_analisa a WHERE a.client_id = c.id))");
     $out = ['sinkron' => [], 'seo' => [], 'paket' => [], 'form' => [], 'analisa' => 0];
     foreach ($rows as $r) {
         if ($r['jenis'] === 'form') $out['form'][(string) $r['judul']] = (int) $r['n'];

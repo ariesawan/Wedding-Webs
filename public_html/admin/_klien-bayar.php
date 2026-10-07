@@ -136,7 +136,7 @@ $pillB = ['lunas' => 'live', 'sebagian' => 'warn', 'lewat' => 'bad', 'hari_ini' 
           <div class="kanan">
             <span class="pill <?= $pillB[$st['kode']] ?? 'draft' ?>"><?= e($pillTeks) ?></span>
             <?php if (!$p['paid_at'] && $bolehB): ?>
-              <form method="post" onsubmit="return confirm('Catat <?= e(rupiah(bayarSisa($p))) ?> untuk <?= e($p['label']) ?> diterima hari ini?')"><?= csrfField() ?>
+              <form method="post" data-confirm="<?= e('Catat ' . rupiah(bayarSisa($p)) . ' untuk ' . $p['label'] . ' diterima hari ini?') ?>"><?= csrfField() ?>
                 <input type="hidden" name="act" value="pay_paid"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
                 <input type="hidden" name="payment_id" value="<?= (int) $p['id'] ?>">
                 <button class="btn sm" type="submit">Tandai lunas</button></form>
@@ -164,7 +164,7 @@ $pillB = ['lunas' => 'live', 'sebagian' => 'warn', 'lewat' => 'bad', 'hari_ini' 
                   </div>
                 </form>
               </details>
-              <form method="post" id="hapusT<?= (int) $p['id'] ?>" onsubmit="return confirm('Hapus termin <?= e($p['label']) ?>?')" hidden><?= csrfField() ?>
+              <form method="post" id="hapusT<?= (int) $p['id'] ?>" data-confirm="<?= e('Hapus termin ' . $p['label'] . '?') ?>" hidden><?= csrfField() ?>
                 <input type="hidden" name="act" value="pay_del"><input type="hidden" name="id" value="<?= (int) $c['id'] ?>">
                 <input type="hidden" name="payment_id" value="<?= (int) $p['id'] ?>"></form>
             <?php endif; ?>

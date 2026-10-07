@@ -420,13 +420,15 @@ function quoteCocok(int $quoteId, ?int $userId = null): array
     if ($qq['stage'] === 'dp' && ($dp = terminDp($cid)) && !$dp['paid_at']) {
         // Tagihan DP di tindakan berikutnya ikut angka baru.
         q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
-          ['Tagih ' . $dp['label'] . ' · ' . rupiah((float) $dp['amount']),
-           $dp['due_date'] ?: date('Y-m-d', strtotime('+3 day')), $cid]);
+          ['Tagih ' . ((float) $dp['terbayar'] > 0 ? 'kekurangan ' : '') . $dp['label'] . ' · ' . rupiah(max(0, (float) $dp['amount'] - (float) $dp['terbayar'])),
+           $dp['due_date'] && $dp['due_date'] >= date('Y-m-d') ? $dp['due_date'] : date('Y-m-d', strtotime('+3 day')), $cid]);
     }
+    // Kontrak lebih murah bisa membuat DP yang sudah dibayar sebagian jadi lunas.
+    $serah = $qq['stage'] === 'dp' ? dpCekSerahTerima($cid, $userId) : [];
     $ket = $ganti ? 'Nilai kontrak ' . rupiah($nilai) : 'Tambahan ' . rupiah($total) . ' · nilai kontrak jadi ' . rupiah($nilai);
     clientLog($cid, 'catatan', $jenis . ' ' . $qq['nomor'] . ' disetujui', $ket . ($n ? " · $n termin disesuaikan" : ''), $userId);
-    $info = ["$ket." . ($n ? " $n termin yang belum dibayar disesuaikan." : '')];
-    return ['tahap' => $qq['stage'], 'info' => $info];
+    $info = array_merge(["$ket." . ($n ? " $n termin yang belum dibayar disesuaikan." : '')], $serah);
+    return ['tahap' => $serah ? 'deal' : $qq['stage'], 'info' => $info];
 }
 
 /**

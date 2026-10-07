@@ -51,21 +51,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if (!$dealing || !array_filter($aktif, fn($b) => $b['id'] === (int) $dealing['id']))
                 throw new RuntimeException('Termin DP (dealing) wajib aktif.');
-            foreach ($baris as $b) {
-                if ($b['id']) {
-                    q("UPDATE payment_templates SET label = ?, persen = ?, offset_hari = ?, urutan = ?, is_active = ? WHERE id = ?",
-                      [$b['label'], $b['persen'], $b['id'] === (int) $dealing['id'] ? null : $b['offset'], $b['urutan'], $b['aktif'], $b['id']]);
-                } else {
-                    $kode = 'termin_' . substr(bin2hex(random_bytes(3)), 0, 6);
-                    q("INSERT INTO payment_templates (kode, label, persen, offset_hari, urutan, wajib, is_active) VALUES (?,?,?,?,?,0,1)",
-                      [$kode, $b['label'], $b['persen'], $b['offset'], $b['urutan']]);
+            // Satu transaksi: susunan termin tidak boleh tersimpan setengah.
+            $pdo = db();
+            $pdo->beginTransaction();
+            try {
+                foreach ($baris as $b) {
+                    if ($b['id']) {
+                        q("UPDATE payment_templates SET label = ?, persen = ?, offset_hari = ?, is_active = ? WHERE id = ?",
+                          [$b['label'], $b['persen'], $b['id'] === (int) $dealing['id'] ? null : $b['offset'], $b['aktif'], $b['id']]);
+                    } else {
+                        $kode = 'termin_' . substr(bin2hex(random_bytes(3)), 0, 6);
+                        q("INSERT INTO payment_templates (kode, label, persen, offset_hari, urutan, wajib, is_active) VALUES (?,?,?,?,?,0,1)",
+                          [$kode, $b['label'], $b['persen'], $b['offset'], 99]);
+                    }
                 }
+                // Urutan: DP pertama, lalu dari H- terbesar (paling awal) ke terkecil.
+                // Diberi nomor 1, 2, 3, … — kolom urutan bertipe TINYINT (maks 127)
+                // di database lama, jadi jangan menulis angka besar seperti 400-H.
+                $urut = all("SELECT id FROM payment_templates
+                             ORDER BY (kode = 'dealing') DESC, (offset_hari IS NULL), offset_hari DESC, id");
+                foreach ($urut as $i => $r) q("UPDATE payment_templates SET urutan = ? WHERE id = ?", [min(120, $i + 1), $r['id']]);
+                $dpPersen = (float) (one("SELECT persen FROM payment_templates WHERE kode = 'dealing'")['persen'] ?? 30);
+                settingSet('dp_percent', rtrim(rtrim(number_format($dpPersen, 2, '.', ''), '0'), '.'));
+                settingSet('dp_tenggat_hari', (string) max(1, min(30, (int) ($_POST['dp_tenggat_hari'] ?? 3))));
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
             }
-            // Urutan: DP pertama, lalu dari H- terbesar (paling awal) ke terkecil.
-            q("UPDATE payment_templates SET urutan = CASE WHEN kode = 'dealing' THEN 1 ELSE 400 - COALESCE(offset_hari, 0) END");
-            $dpPersen = (float) (one("SELECT persen FROM payment_templates WHERE kode = 'dealing'")['persen'] ?? 30);
-            settingSet('dp_percent', rtrim(rtrim(number_format($dpPersen, 2, '.', ''), '0'), '.'));
-            settingSet('dp_tenggat_hari', (string) max(1, min(30, (int) ($_POST['dp_tenggat_hari'] ?? 3))));
             flash('Susunan termin disimpan. Berlaku untuk klien yang termin-nya disusun setelah ini.');
         }
         elseif ($act === 'pengingat') {

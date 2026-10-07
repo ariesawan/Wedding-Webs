@@ -340,6 +340,23 @@ function terminDp(int $clientId): ?array
 }
 
 /**
+ * DP sudah lunas lewat jalur selain konfirmasi DP (nominal DP diubah sama
+ * dengan yang sudah dibayar, kontrak disesuaikan, kelebihan bayar termin
+ * lain mengalir ke DP): serahkan klien ke admin office sekarang juga, supaya
+ * tidak tertinggal di Menunggu DP dengan tagihan yang sudah lunas.
+ * @return string[] info
+ */
+function dpCekSerahTerima(int $clientId, ?int $userId = null): array
+{
+    $c = one("SELECT stage FROM clients WHERE id = ?", [$clientId]);
+    if (!$c || $c['stage'] !== 'dp') return [];
+    $dp = terminDp($clientId);
+    if (!$dp || !$dp['paid_at']) return [];
+    $r = clientSetStage($clientId, 'deal', $userId, $dp['label'] . ' lunas.');
+    return array_merge([$dp['label'] . ' sudah lunas — klien sekarang Deal dan dipegang admin office.'], $r['info']);
+}
+
+/**
  * DP diterima → klien deal dan diserahkan ke admin office.
  *
  * Satu-satunya pintu serah terima: uangnya dicatat lewat bayarCatat() (jadi
@@ -365,6 +382,13 @@ function dpDiterima(int $clientId, ?int $userId = null, string $tanggal = '', st
         $dp = terminDp($clientId);
     }
     $catat = null;
+    if ($dp['paid_at'] && (float) ($opt['jumlah'] ?? 0) > 0 && !stageSudahDeal($c['stage'])) {
+        // Uang yang baru diketik tidak boleh hilang tanpa kwitansi hanya
+        // karena DP-nya ternyata sudah lunas lewat jalur lain.
+        dpCekSerahTerima($clientId, $userId);
+        throw new RuntimeException($dp['label'] . ' ternyata sudah lunas tercatat, jadi klien dipindah ke Deal. '
+            . 'Uang yang baru masuk catat di tab Pembayaran (untuk termin berikutnya).');
+    }
     if (!$dp['paid_at'] && bayarSisa($dp) > 0) {
         $jumlah = isset($opt['jumlah']) && (float) $opt['jumlah'] > 0 ? (float) $opt['jumlah'] : bayarSisa($dp);
         $catat = bayarCatat($clientId, $jumlah, $tanggal, $metode ?: 'Transfer bank', [
@@ -558,12 +582,24 @@ function clientSetStage(int $id, string $stage, ?int $userId = null, string $not
         if ($nilai > 0) {
             $n = terminSusun($id);
             if ($n) $info[] = "Termin pembayaran disusun dari template ($n termin).";
+            elseif ($ns = terminSesuaikan($id)) {
+                // Termin sudah ada dari paket sebelumnya (klien pernah di
+                // Menunggu DP, lalu ganti paket / diaktifkan lagi): DP dan
+                // termin lain mengikuti nilai deal yang baru.
+                $info[] = "$ns termin disesuaikan ke nilai deal baru " . rupiah($nilai) . '.';
+            }
             $dp = terminDp($id);
-            if ($dp) {
+            if ($dp && !$dp['paid_at']) {
+                $due = $dp['due_date'];
+                if (!$due || $due < date('Y-m-d')) {
+                    // Tenggat DP lama sudah lewat — beri tenggat baru.
+                    $due = date('Y-m-d', strtotime('+' . max(1, (int) setting('dp_tenggat_hari', '3')) . ' day'));
+                    q("UPDATE payments SET due_date = ? WHERE id = ?", [$due, $dp['id']]);
+                }
+                $sisaDp = max(0, (float) $dp['amount'] - (float) $dp['terbayar']);
                 q("UPDATE clients SET next_action = ?, next_action_at = ? WHERE id = ?",
-                  ['Tagih ' . $dp['label'] . ' · ' . rupiah((float) $dp['amount']),
-                   $dp['due_date'] ?: date('Y-m-d', strtotime('+3 day')), $id]);
-                $info[] = 'Tagih ' . $dp['label'] . ' ' . rupiah((float) $dp['amount'])
+                  ['Tagih ' . ((float) $dp['terbayar'] > 0 ? 'kekurangan ' : '') . $dp['label'] . ' · ' . rupiah($sisaDp), $due, $id]);
+                $info[] = 'Tagih ' . $dp['label'] . ' ' . rupiah($sisaDp)
                         . '. Begitu ditandai lunas, klien otomatis diserahkan ke admin office.';
             }
         } else {
@@ -664,14 +700,27 @@ function terminGeser(int $clientId, string $weddingDate): int
 }
 
 /** Perbarui tanggal jatuh tempo checklist bila tanggal pernikahan bergeser. */
-function retimeTasks(int $clientId, string $weddingDate): int
+function retimeTasks(int $clientId, string $weddingDate, ?string $tanggalLama = null): int
 {
-    $rows = all("SELECT id, offset_day FROM client_tasks WHERE client_id = ? AND done_at IS NULL", [$clientId]);
+    // Langkah bawaan dihitung ulang dari hari-H. Langkah yang ditambah tangan
+    // (offset_day-nya selalu 0) tidak boleh ikut ditarik ke hari-H: tanggalnya
+    // digeser sebanyak pergeseran hari-H, atau dibiarkan bila tak diketahui.
+    $bawaan = array_column(TASK_TEMPLATE, 1);
+    $geser = $tanggalLama ? (int) round((strtotime($weddingDate) - strtotime($tanggalLama)) / 86400) : null;
+    $rows = all("SELECT id, title, offset_day, due_date FROM client_tasks WHERE client_id = ? AND done_at IS NULL", [$clientId]);
+    $n = 0;
     foreach ($rows as $r) {
-        q("UPDATE client_tasks SET due_date = ? WHERE id = ?",
-          [tugasTempo($weddingDate, (int) $r['offset_day']), $r['id']]);
+        if (in_array($r['title'], $bawaan, true)) {
+            $due = tugasTempo($weddingDate, (int) $r['offset_day']);
+        } elseif ($geser !== null && $r['due_date']) {
+            $due = date('Y-m-d', strtotime($r['due_date'] . ' ' . ($geser >= 0 ? '+' : '') . $geser . ' day'));
+        } else {
+            continue;
+        }
+        q("UPDATE client_tasks SET due_date = ? WHERE id = ?", [$due, $r['id']]);
+        $n++;
     }
-    return count($rows);
+    return $n;
 }
 
 /** Ringkasan uang satu klien. */

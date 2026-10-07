@@ -347,7 +347,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (isset($data['deal_value']) && abs((float) $data['deal_value'] - $nilaiLama) >= 0.5
                     && one("SELECT 1 FROM payments WHERE client_id = ? LIMIT 1", [$id])) {
                     $nt = terminSesuaikan($id);
-                    flash('Data klien tersimpan. Nilai deal berubah' . ($nt ? " — $nt termin yang belum lunas disesuaikan." : '.'));
+                    $serah = dpCekSerahTerima($id, (int) $user['id']);
+                    flash('Data klien tersimpan. Nilai deal berubah' . ($nt ? " — $nt termin yang belum lunas disesuaikan." : '.')
+                          . ($serah ? "\n" . implode("\n", $serah) : ''));
                 }
 
                 // Tanggal nikah bergeser -> seluruh checklist ikut digeser.
@@ -359,7 +361,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $nt = terminGeser($id, $tglBaru);
                     if ($nt) clientLog($id, 'sistem', 'Jatuh tempo termin digeser', "$nt termin mengikuti tanggal baru.", $user['id']);
                     if (eventPastikan($id)) flash('Data klien tersimpan. Event dibuat di menu Event.');
-                    $n = retimeTasks($id, $tglBaru);
+                    $n = retimeTasks($id, $tglBaru, $lama['wedding_date'] ?: null);
                     if ($n) {
                         clientLog($id, 'sistem', 'Tanggal pernikahan diubah', "Jatuh tempo $n langkah checklist ikut digeser.", $user['id']);
                         flash("Tersimpan. $n langkah checklist digeser mengikuti tanggal baru.");
@@ -761,6 +763,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'catatan' => $_POST['catatan'] ?? '', 'user_id' => (int) $user['id'],
                     ]);
                     $pesan = rupiah($jumlah) . ' dicatat (' . $hasil['kwitansi'] . '): ' . $hasil['ringkas'] . '.';
+                    // Kelebihan bayar termin lain bisa ikut melunasi DP.
+                    if ($serah = dpCekSerahTerima($id, (int) $user['id'])) $pesan .= "\n" . implode("\n", $serah);
                 }
                 if ($hasil && !empty($_POST['kirim_kwitansi'])) {
                     $k = bayarKirimKwitansi((int) $hasil['id'], (int) $user['id']);
@@ -837,7 +841,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (abs($amt - (float) $pB['amount']) >= 0.5) $ub[] = rupiah((float) $pB['amount']) . ' → ' . rupiah($amt);
                 if ($due !== $pB['due_date']) $ub[] = 'tempo ' . ($pB['due_date'] ? tanggalID($pB['due_date']) : '—') . ' → ' . ($due ? tanggalID($due) : '—');
                 if ($ub) clientLog($id, 'bayar', 'Termin diubah: ' . $pB['label'], implode('; ', $ub), (int) $user['id']);
-                flash('Termin disimpan.');
+                $serah = dpCekSerahTerima($id, (int) $user['id']);
+                flash('Termin disimpan.' . ($serah ? "\n" . implode("\n", $serah) : ''));
                 redirect($ke);
             }
 
@@ -850,7 +855,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     flash('Nilai kontrak sekarang ' . rupiah($tot) . '.');
                 } else {
                     $n = terminSesuaikan($id);
-                    flash($n ? "$n termin yang belum lunas disesuaikan ke nilai kontrak." : 'Tidak ada termin yang bisa disesuaikan — tambah termin atau ubah nominal secara manual.', $n ? 'ok' : 'warn');
+                    $serah = dpCekSerahTerima($id, (int) $user['id']);
+                    flash(($n ? "$n termin yang belum lunas disesuaikan ke nilai kontrak." : 'Tidak ada termin yang bisa disesuaikan — tambah termin atau ubah nominal secara manual.')
+                          . ($serah ? "\n" . implode("\n", $serah) : ''), $n ? 'ok' : 'warn');
                 }
                 redirect($ke);
             }
@@ -885,6 +892,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $id = (int) $_POST['id'];
             if (($user['role'] ?? '') === 'admin_office')
                 throw new RuntimeException('Admin office tidak menghapus klien. Minta owner atau admin early.');
+            // Kwitansi bernomor adalah dokumen keuangan yang sudah sampai ke
+            // klien. Menghapusnya juga membuat nomornya terbit ulang untuk klien
+            // lain (nomor berikutnya = nomor terbesar yang masih ada).
+            try {
+                if (one("SELECT 1 FROM payment_receipts WHERE client_id = ? AND kwitansi_no <> '' LIMIT 1", [$id]))
+                    throw new RuntimeException('Klien ini sudah punya kwitansi pembayaran, jadi tidak bisa dihapus. '
+                        . 'Tandai "Tidak jadi" saja (alasannya tercatat di Analisa); kwitansi yang salah bisa dibatalkan dari tab Pembayaran.');
+            } catch (PDOException $e) { /* tabel penerimaan belum ada */ }
             // Semua tabel turunan ikut dibersihkan. Dulu hanya tiga yang
             // dihapus; penawaran, kebutuhan vendor, susunan, dan data lengkap
             // tertinggal tanpa induk — dan nomor penawarannya tetap terhitung.
@@ -1036,7 +1051,7 @@ if ($c):
     $nextTask = null;
     foreach ($tasks as $t) if (!$t['done_at']) { $nextTask = $t; break; }
     $nextPay = null;
-    foreach ($pays as $p) if (!$p['paid_at']) { $nextPay = $p; break; }
+    foreach ($pays as $p) if (!$p['paid_at'] && bayarSisa($p) > 0.5) { $nextPay = $p; break; }
 
     pageHead($judul,
         stageLabel($stage) . ' · ' . (PIPE_STAGES[$stage]['desc'] ?? ''),
@@ -1139,7 +1154,7 @@ if ($c):
               <?= $formTahap('dp', 'Lanjut: tagih DP 30% →') ?>
             <?php elseif ($totQ > 0 && in_array($qAkhir['status'], ['draf', 'terkirim'], true)): ?>
               <form method="post" action="penawaran.php" style="display:inline"
-                    onsubmit="return confirm(<?= e(json_encode('Klien cocok dengan ' . $qAkhir['nomor'] . ' (' . rupiah($totQ) . ')? DP 30% (' . rupiah(round($totQ * 0.3)) . ') langsung ditagih.')) ?>)">
+                    onsubmit="return confirm(<?= e(json_encode('Klien cocok dengan ' . $qAkhir['nomor'] . ' (' . rupiah($totQ) . ')? DP ' . ((int) setting('dp_percent', '30') ?: 30) . '% (' . rupiah(round($totQ * (((int) setting('dp_percent', '30') ?: 30) / 100))) . ') langsung ditagih.')) ?>)">
                 <?= csrfField() ?><input type="hidden" name="act" value="cocok"><input type="hidden" name="id" value="<?= (int) $qAkhir['id'] ?>">
                 <button class="btn solid" type="submit">Klien cocok → tagih DP 30%</button></form>
             <?php endif; ?>
@@ -1230,7 +1245,7 @@ if ($c):
         <h2><?= $stage === 'harih' ? 'Minggu hari-H' : 'Persiapan berjalan' ?></h2>
         <p class="sub"><?= count($tasks) ? $done . ' dari ' . count($tasks) . ' langkah checklist selesai.' : 'Checklist belum dibuat.' ?>
           <?php if ($nextTask): ?><br>Berikutnya: <b><?= e($nextTask['title']) ?></b><?= $nextTask['due_date'] ? ' · ' . e(labelHari($nextTask['due_date'])) : '' ?><?php endif; ?>
-          <?php if ($nextPay): ?><br>Tagihan berikutnya: <b><?= e($nextPay['label']) ?></b> <?= rupiah((float) $nextPay['amount']) ?><?= $nextPay['due_date'] ? ' · ' . e(labelHari($nextPay['due_date'])) : '' ?><?php endif; ?></p>
+          <?php if ($nextPay): ?><br>Tagihan berikutnya: <b><?= e($nextPay['label']) ?></b> <?= rupiah(bayarSisa($nextPay)) ?><?= (float) $nextPay['terbayar'] > 0 ? ' (sisa)' : '' ?><?= $nextPay['due_date'] ? ' · ' . e(labelHari($nextPay['due_date'])) : '' ?><?php endif; ?></p>
         <?php if (count($tasks)): ?><div class="bar-progress" style="margin-bottom:14px"><i style="width:<?= round($done / count($tasks) * 100) ?>%"></i></div><?php endif; ?>
         <div class="aksi">
           <a class="btn solid" href="#checklist">Buka checklist</a>

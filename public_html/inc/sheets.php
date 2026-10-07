@@ -210,7 +210,9 @@ function sheetsSyncAll(): array
         $rows[] = [$meta['label'], $stat($key), '', '', ''];
     }
     $tot = one("SELECT COALESCE(SUM(deal_value),0) v FROM clients WHERE stage NOT IN ('batal')");
-    $lun = one("SELECT COALESCE(SUM(terbayar),0) v FROM payments");
+    // Populasi sama dengan "Total nilai deal" (tanpa klien batal), supaya
+    // "Belum tertagih" tidak terpotong uang yang ditahan dari klien batal.
+    $lun = one("SELECT COALESCE(SUM(p.terbayar),0) v FROM payments p JOIN clients c ON c.id = p.client_id WHERE c.stage <> 'batal'");
     $rows[] = [];
     $rows[] = ['Total nilai deal', (float) ($tot['v'] ?? 0)];
     $rows[] = ['Sudah diterima',   (float) ($lun['v'] ?? 0)];

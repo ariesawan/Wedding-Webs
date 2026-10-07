@@ -234,9 +234,13 @@ SELECT p.client_id, p.id, '', LEAST(p.paid_at, CURDATE()), p.amount, p.method, '
    AND NOT EXISTS (SELECT 1 FROM payment_receipts r WHERE r.payment_id = p.id);
 UPDATE payments SET terbayar = amount, paid_at = LEAST(paid_at, CURDATE())
  WHERE paid_at IS NOT NULL AND terbayar = 0;
+-- Salin aturan H- dari template HANYA saat pertama kali naik ke v24. Setelah
+-- itu offset_hari kosong berarti "tanggal diatur tangan" — jangan ditimpa
+-- kalau berkas ini dijalankan ulang.
 UPDATE payments p JOIN payment_templates t ON t.kode = p.kode AND p.kode <> ''
    SET p.offset_hari = t.offset_hari
- WHERE p.offset_hari IS NULL AND p.paid_at IS NULL AND t.offset_hari IS NOT NULL;
+ WHERE p.offset_hari IS NULL AND p.paid_at IS NULL AND t.offset_hari IS NOT NULL
+   AND COALESCE((SELECT CAST(s.v AS UNSIGNED) FROM settings s WHERE s.k = 'skema_versi'), 0) < 24;
 
 DROP PROCEDURE IF EXISTS `v24_tambah_kolom`;
 
